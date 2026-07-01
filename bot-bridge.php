@@ -14,7 +14,7 @@
 header('Content-Type: application/json');
 
 // Your secret key — must match the one in the bot's config.php
-$API_SECRET = 'CHANGE_THIS_TO_A_RANDOM_STRING';
+$API_SECRET = '717e34f13a2589d049d43149649e2668318e4949712b6f2f7e9cd94e28ad8f07';
 
 // Read incoming request
 $input = file_get_contents('php://input');

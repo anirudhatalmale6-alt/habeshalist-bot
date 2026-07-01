@@ -1,10 +1,10 @@
 <?php
 
 return [
-    'bot_token' => getenv('TELEGRAM_BOT_TOKEN') ?: 'YOUR_BOT_TOKEN',
+    'bot_token' => getenv('TELEGRAM_BOT_TOKEN') ?: 'REDACTED',
 
-    // Secret key for the API bridge (generate a random string)
-    'api_secret' => getenv('API_SECRET') ?: 'CHANGE_THIS_TO_A_RANDOM_STRING',
+    // Secret key for the API bridge
+    'api_secret' => getenv('API_SECRET') ?: '717e34f13a2589d049d43149649e2668318e4949712b6f2f7e9cd94e28ad8f07',
 
     // Your OSClass website URL
     'website_url' => 'https://www.habeshalist.com',
