@@ -19,7 +19,7 @@ return [
     'payment_provider_token' => getenv('PAYMENT_PROVIDER_TOKEN') ?: '',
 
     // Admin Telegram user IDs (add your Telegram user ID here)
-    'admin_ids' => [],
+    'admin_ids' => [702720985],
 
     // Bot assistant name
     'bot_name' => 'Yohana',
