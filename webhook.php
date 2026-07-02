@@ -15,13 +15,11 @@ if (!$update) {
     exit;
 }
 
-// Handle callback queries (inline button taps)
 if (isset($update['callback_query'])) {
     handleCallbackQuery($update['callback_query']);
     exit;
 }
 
-// Handle regular messages
 if (isset($update['message'])) {
     handleMessage($update['message']);
     exit;
@@ -31,7 +29,7 @@ http_response_code(200);
 exit;
 
 // ============================================================
-// CALLBACK QUERY HANDLER (inline button taps)
+// CALLBACK QUERY HANDLER
 // ============================================================
 
 function handleCallbackQuery($query) {
@@ -42,76 +40,255 @@ function handleCallbackQuery($query) {
     $data = $query['data'];
     $chatId = $query['message']['chat']['id'];
     $userId = $query['from']['id'];
+    $state = $db->getState($userId);
 
-    // Group button taps — redirect to private chat
-    if (in_array($data, ['post_ad', 'promote', 'botw', 'contact'])) {
-        $botUsername = getBotUsername();
-        $deepLink = "https://t.me/{$botUsername}?start={$data}";
-        $tg->sendMessage($chatId, "👉 <a href=\"{$deepLink}\">Tap here to continue in private chat</a>");
+    // ---- Navigation ----
+
+    if ($data === 'main_menu') {
+        $user = $db->getUser($userId);
+        $db->setState($userId, 'idle', []);
+        showMainMenu($userId, $user['name'] ?? 'there');
         return;
     }
 
-    // Private chat callbacks
-    $state = $db->getState($userId);
+    if ($data === 'cancel') {
+        $user = $db->getUser($userId);
+        $db->setState($userId, 'idle', []);
+        showMainMenu($userId, $user['name'] ?? 'there');
+        return;
+    }
 
-    // Back to categories
+    // ---- Main menu actions ----
+
+    if ($data === 'post_ad') {
+        handleAction($userId, 'post_ad');
+        return;
+    }
+    if ($data === 'promote') {
+        handleAction($userId, 'promote');
+        return;
+    }
+    if ($data === 'botw') {
+        handleAction($userId, 'botw');
+        return;
+    }
+    if ($data === 'contact') {
+        handleAction($userId, 'contact');
+        return;
+    }
+
+    // ---- Category / Subcategory ----
+
     if ($data === 'cat_back') {
         showCategoryPicker($userId);
         return;
     }
 
-    // Category selection
     if (strpos($data, 'cat_') === 0) {
         $catKey = substr($data, 4);
         handleCategorySelect($userId, $catKey, $state);
         return;
     }
 
-    // Subcategory selection
     if (strpos($data, 'subcat_') === 0) {
         $subcatKey = substr($data, 7);
         handleSubcategorySelect($userId, $subcatKey, $state);
         return;
     }
 
-    // Location selection
+    // ---- Location ----
+
     if (strpos($data, 'loc_') === 0) {
         $locKey = substr($data, 4);
         handleLocationSelect($userId, $locKey, $state);
         return;
     }
 
-    // Confirm publish
-    if ($data === 'confirm_publish') {
-        handlePublish($userId, $state);
+    // ---- Back navigation ----
+
+    if ($data === 'back_to_cats') {
+        showCategoryPicker($userId);
         return;
     }
 
-    // Edit ad before publishing
-    if ($data === 'edit_ad') {
-        handleEditAd($userId, $state);
+    if ($data === 'back_to_subcats') {
+        $stateData = $state['data'];
+        $catKey = $stateData['category'] ?? '';
+        if ($catKey) {
+            handleCategorySelect($userId, $catKey, $state);
+        } else {
+            showCategoryPicker($userId);
+        }
         return;
     }
 
-    // Cancel
-    if ($data === 'cancel') {
-        $db->setState($userId, 'idle', []);
-        $tg->sendMessage($userId, "❌ Cancelled. Send /menu to start over.");
+    if ($data === 'back_to_title') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'awaiting_title', $stateData);
+        $tg->sendInlineButtons($userId,
+            "📝 Enter the <b>title</b> for your ad:",
+            [
+                [
+                    ['text' => '⬅️ Back', 'callback_data' => 'back_to_subcats'],
+                    ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+                ],
+            ]
+        );
         return;
     }
 
-    // Done uploading photos
+    if ($data === 'back_to_desc') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'awaiting_description', $stateData);
+        $tg->sendInlineButtons($userId,
+            "📝 Enter a <b>description</b> for your ad:\n\n(Describe what you're offering in detail)",
+            [
+                [
+                    ['text' => '⬅️ Back', 'callback_data' => 'back_to_title'],
+                    ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+                ],
+            ]
+        );
+        return;
+    }
+
+    if ($data === 'back_to_price') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'awaiting_price', $stateData);
+        $tg->sendInlineButtons($userId,
+            "💰 Enter the <b>price</b>:\n\n(Enter a number, or type \"Free\" or \"Negotiable\")",
+            [
+                [
+                    ['text' => '⬅️ Back', 'callback_data' => 'back_to_desc'],
+                    ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+                ],
+            ]
+        );
+        return;
+    }
+
+    if ($data === 'back_to_location') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'awaiting_location', $stateData);
+        showLocationPicker($userId);
+        return;
+    }
+
+    if ($data === 'back_to_photos') {
+        $stateData = $state['data'];
+        $stateData['photos'] = [];
+        $db->setState($userId, 'awaiting_photos', $stateData);
+        showPhotoPrompt($userId);
+        return;
+    }
+
+    // ---- Photos ----
+
     if ($data === 'photos_done') {
         handlePhotosDone($userId, $state);
         return;
     }
 
-    // Skip photos
     if ($data === 'photos_skip') {
         $stateData = $state['data'];
         $stateData['photos'] = [];
         $db->setState($userId, 'awaiting_review', $stateData);
         showAdReview($userId, $stateData);
+        return;
+    }
+
+    // ---- Review / Publish ----
+
+    if ($data === 'confirm_publish') {
+        handlePublish($userId, $state);
+        return;
+    }
+
+    if ($data === 'edit_ad') {
+        showEditOptions($userId, $state);
+        return;
+    }
+
+    // ---- Edit individual fields ----
+
+    if ($data === 'edit_title') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'editing_title', $stateData);
+        $tg->sendInlineButtons($userId,
+            "Current title: <b>{$stateData['title']}</b>\n\n📝 Enter the new <b>title</b>:",
+            [[['text' => '⬅️ Back to Review', 'callback_data' => 'back_to_review']]]
+        );
+        return;
+    }
+
+    if ($data === 'edit_description') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'editing_description', $stateData);
+        $tg->sendInlineButtons($userId,
+            "Current description:\n{$stateData['description']}\n\n📝 Enter the new <b>description</b>:",
+            [[['text' => '⬅️ Back to Review', 'callback_data' => 'back_to_review']]]
+        );
+        return;
+    }
+
+    if ($data === 'edit_price') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'editing_price', $stateData);
+        $tg->sendInlineButtons($userId,
+            "Current price: <b>{$stateData['price']}</b>\n\n💰 Enter the new <b>price</b>:",
+            [[['text' => '⬅️ Back to Review', 'callback_data' => 'back_to_review']]]
+        );
+        return;
+    }
+
+    if ($data === 'edit_location') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'editing_location', $stateData);
+        showLocationPicker($userId, true);
+        return;
+    }
+
+    if ($data === 'edit_photos') {
+        $stateData = $state['data'];
+        $stateData['photos'] = [];
+        $db->setState($userId, 'editing_photos', $stateData);
+        showPhotoPrompt($userId, true);
+        return;
+    }
+
+    if ($data === 'back_to_review') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'awaiting_review', $stateData);
+        showAdReview($userId, $stateData);
+        return;
+    }
+
+    // ---- Edit location select ----
+
+    if (strpos($data, 'eloc_') === 0) {
+        $locKey = substr($data, 5);
+        $stateData = $state['data'];
+        $locName = $config['locations'][$locKey] ?? $locKey;
+        $stateData['location'] = $locKey;
+        $stateData['location_name'] = $locName;
+        $db->setState($userId, 'awaiting_review', $stateData);
+        showAdReview($userId, $stateData);
+        return;
+    }
+
+    // ---- Edit photos done ----
+
+    if ($data === 'edit_photos_done') {
+        $stateData = $state['data'];
+        $db->setState($userId, 'awaiting_review', $stateData);
+        showAdReview($userId, $stateData);
+        return;
+    }
+
+    // ---- Post-publish actions ----
+
+    if ($data === 'post_another') {
+        showCategoryPicker($userId);
         return;
     }
 }
@@ -128,7 +305,7 @@ function handleMessage($msg) {
     $text = trim($msg['text'] ?? '');
     $isPrivate = ($msg['chat']['type'] === 'private');
 
-    // Handle /start with deep link in private chat
+    // /start with deep link in private chat
     if ($isPrivate && strpos($text, '/start') === 0) {
         $parts = explode(' ', $text);
         $param = $parts[1] ?? '';
@@ -136,9 +313,7 @@ function handleMessage($msg) {
         $user = $db->getUser($userId);
 
         if (!$user) {
-            // New user — start registration, remember intended action
             $db->setState($userId, 'reg_name', ['intended_action' => $param]);
-            $botName = $config['bot_name'];
             $tg->sendMessage($userId,
                 "👋 Welcome to HabeshaList.com!\n\n" .
                 "Before we begin, let's create your free account.\n\n" .
@@ -147,7 +322,6 @@ function handleMessage($msg) {
             return;
         }
 
-        // Existing user — go to intended action or main menu
         if ($param) {
             handleAction($userId, $param);
         } else {
@@ -156,7 +330,7 @@ function handleMessage($msg) {
         return;
     }
 
-    // Handle /menu in private chat
+    // /menu in private chat
     if ($isPrivate && $text === '/menu') {
         $user = $db->getUser($userId);
         if ($user) {
@@ -172,7 +346,7 @@ function handleMessage($msg) {
         return;
     }
 
-    // Handle /setup in group (sends the pinned message with inline buttons)
+    // /setup in group (admin only)
     if (!$isPrivate && ($text === '/setup' || strpos($text, '/setup@') === 0)) {
         if (isAdmin($userId)) {
             sendGroupButtons($chatId);
@@ -180,12 +354,12 @@ function handleMessage($msg) {
         return;
     }
 
-    // Handle photo messages in private chat
+    // Photo messages in private chat
     if ($isPrivate && isset($msg['photo'])) {
         if (handlePhotoMessage($userId, $msg)) return;
     }
 
-    // Handle state-based conversation in private chat
+    // State-based conversation in private chat
     if ($isPrivate) {
         handleStateInput($userId, $msg);
     }
@@ -256,7 +430,15 @@ function handleStateInput($userId, $msg) {
             }
             $stateData['title'] = $text;
             $db->setState($userId, 'awaiting_description', $stateData);
-            $tg->sendMessage($userId, "📝 Now enter a <b>description</b> for your ad:\n\n(Describe what you're offering in detail)");
+            $tg->sendInlineButtons($userId,
+                "📝 Now enter a <b>description</b> for your ad:\n\n(Describe what you're offering in detail)",
+                [
+                    [
+                        ['text' => '⬅️ Back', 'callback_data' => 'back_to_title'],
+                        ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+                    ],
+                ]
+            );
             break;
 
         case 'awaiting_description':
@@ -266,7 +448,15 @@ function handleStateInput($userId, $msg) {
             }
             $stateData['description'] = $text;
             $db->setState($userId, 'awaiting_price', $stateData);
-            $tg->sendMessage($userId, "💰 Enter the <b>price</b>:\n\n(Enter a number, or type \"Free\" or \"Negotiable\")");
+            $tg->sendInlineButtons($userId,
+                "💰 Enter the <b>price</b>:\n\n(Enter a number, or type \"Free\" or \"Negotiable\")",
+                [
+                    [
+                        ['text' => '⬅️ Back', 'callback_data' => 'back_to_desc'],
+                        ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+                    ],
+                ]
+            );
             break;
 
         case 'awaiting_price':
@@ -275,8 +465,20 @@ function handleStateInput($userId, $msg) {
             showLocationPicker($userId);
             break;
 
+        case 'awaiting_location_other':
+            if (strlen($text) < 2) {
+                $tg->sendMessage($userId, "Please enter a valid location:");
+                return;
+            }
+            $stateData['location'] = 'other';
+            $stateData['location_name'] = $text;
+            $db->setState($userId, 'awaiting_photos', $stateData);
+            $stateData['photos'] = [];
+            $db->setState($userId, 'awaiting_photos', $stateData);
+            showPhotoPrompt($userId);
+            break;
+
         case 'awaiting_photos':
-            // Handle photo uploads
             if (isset($msg['photo'])) {
                 $photo = end($msg['photo']);
                 $stateData['photos'] = $stateData['photos'] ?? [];
@@ -284,17 +486,71 @@ function handleStateInput($userId, $msg) {
                 $count = count($stateData['photos']);
                 $db->setState($userId, 'awaiting_photos', $stateData);
 
+                $buttons = [
+                    [['text' => '✅ Done', 'callback_data' => 'photos_done']],
+                ];
+                if ($count < 5) {
+                    $buttons[] = [['text' => '❌ Cancel', 'callback_data' => 'cancel']];
+                }
+
                 $tg->sendInlineButtons($userId,
-                    "📸 Photo {$count} received! Send more photos or tap Done.",
+                    "📸 Photo {$count}/5 received! Send more photos or tap Done.",
+                    $buttons
+                );
+                return;
+            }
+            if ($text) {
+                $tg->sendMessage($userId, "Please send a photo, or tap one of the buttons above.");
+            }
+            break;
+
+        // --- EDIT FLOW ---
+
+        case 'editing_title':
+            if (strlen($text) < 3) {
+                $tg->sendMessage($userId, "Title must be at least 3 characters:");
+                return;
+            }
+            $stateData['title'] = $text;
+            $db->setState($userId, 'awaiting_review', $stateData);
+            showAdReview($userId, $stateData);
+            break;
+
+        case 'editing_description':
+            if (strlen($text) < 10) {
+                $tg->sendMessage($userId, "Description must be at least 10 characters:");
+                return;
+            }
+            $stateData['description'] = $text;
+            $db->setState($userId, 'awaiting_review', $stateData);
+            showAdReview($userId, $stateData);
+            break;
+
+        case 'editing_price':
+            $stateData['price'] = $text;
+            $db->setState($userId, 'awaiting_review', $stateData);
+            showAdReview($userId, $stateData);
+            break;
+
+        case 'editing_photos':
+            if (isset($msg['photo'])) {
+                $photo = end($msg['photo']);
+                $stateData['photos'] = $stateData['photos'] ?? [];
+                $stateData['photos'][] = $photo['file_id'];
+                $count = count($stateData['photos']);
+                $db->setState($userId, 'editing_photos', $stateData);
+
+                $tg->sendInlineButtons($userId,
+                    "📸 Photo {$count}/5 received! Send more or tap Done.",
                     [
-                        [['text' => '✅ Done', 'callback_data' => 'photos_done']],
+                        [['text' => '✅ Done', 'callback_data' => 'edit_photos_done']],
+                        [['text' => '❌ Cancel', 'callback_data' => 'back_to_review']],
                     ]
                 );
                 return;
             }
-
             if ($text) {
-                $tg->sendMessage($userId, "Please send a photo, or tap one of the buttons below.");
+                $tg->sendMessage($userId, "Please send a photo, or tap one of the buttons above.");
             }
             break;
 
@@ -310,24 +566,27 @@ function handleStateInput($userId, $msg) {
     }
 }
 
-// Handle photo messages in awaiting_photos state
 function handlePhotoMessage($userId, $msg) {
     global $tg, $db;
 
     $state = $db->getState($userId);
-    if ($state['state'] !== 'awaiting_photos') return false;
+    if ($state['state'] !== 'awaiting_photos' && $state['state'] !== 'editing_photos') return false;
 
     $photo = end($msg['photo']);
     $stateData = $state['data'];
     $stateData['photos'] = $stateData['photos'] ?? [];
     $stateData['photos'][] = $photo['file_id'];
     $count = count($stateData['photos']);
-    $db->setState($userId, 'awaiting_photos', $stateData);
+    $db->setState($userId, $state['state'], $stateData);
+
+    $doneCallback = ($state['state'] === 'editing_photos') ? 'edit_photos_done' : 'photos_done';
+    $cancelCallback = ($state['state'] === 'editing_photos') ? 'back_to_review' : 'cancel';
 
     $tg->sendInlineButtons($userId,
-        "📸 Photo {$count} received! Send more or tap Done.",
+        "📸 Photo {$count}/5 received! Send more or tap Done.",
         [
-            [['text' => '✅ Done - Proceed to Review', 'callback_data' => 'photos_done']],
+            [['text' => '✅ Done', 'callback_data' => $doneCallback]],
+            [['text' => '❌ Cancel', 'callback_data' => $cancelCallback]],
         ]
     );
     return true;
@@ -345,10 +604,16 @@ function handleAction($userId, $action) {
             showCategoryPicker($userId);
             break;
         case 'promote':
-            $tg->sendMessage($userId, "📢 <b>Promote Your Business</b>\n\nThis feature is coming soon in Phase 2! Stay tuned.");
+            $tg->sendInlineButtons($userId,
+                "📢 <b>Promote Your Business</b>\n\nThis feature is coming soon! Stay tuned.",
+                [[['text' => '🏠 Main Menu', 'callback_data' => 'main_menu']]]
+            );
             break;
         case 'botw':
-            $tg->sendMessage($userId, "🏆 <b>Business of the Week</b>\n\nThis feature is coming soon in Phase 2! Stay tuned.");
+            $tg->sendInlineButtons($userId,
+                "🏆 <b>Business of the Week</b>\n\nThis feature is coming soon! Stay tuned.",
+                [[['text' => '🏠 Main Menu', 'callback_data' => 'main_menu']]]
+            );
             break;
         case 'contact':
             showContactInfo($userId);
@@ -383,7 +648,15 @@ function handleCategorySelect($userId, $catKey, $state) {
 
     if (empty($cat['subcategories'])) {
         $db->setState($userId, 'awaiting_title', $stateData);
-        $tg->sendMessage($userId, "✅ Category: <b>{$cat['name']}</b>\n\n📝 Now enter the <b>title</b> for your ad:");
+        $tg->sendInlineButtons($userId,
+            "✅ Category: <b>{$cat['name']}</b>\n\n📝 Enter the <b>title</b> for your ad:",
+            [
+                [
+                    ['text' => '⬅️ Back', 'callback_data' => 'cat_back'],
+                    ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+                ],
+            ]
+        );
         return;
     }
 
@@ -391,7 +664,10 @@ function handleCategorySelect($userId, $catKey, $state) {
     foreach ($cat['subcategories'] as $key => $name) {
         $buttons[] = [['text' => $name, 'callback_data' => 'subcat_' . $key]];
     }
-    $buttons[] = [['text' => '⬅️ Back to Categories', 'callback_data' => 'cat_back']];
+    $buttons[] = [
+        ['text' => '⬅️ Back', 'callback_data' => 'cat_back'],
+        ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+    ];
 
     $db->setState($userId, 'awaiting_subcategory', $stateData);
     $tg->sendInlineButtons($userId, "📂 <b>{$cat['name']}</b>\n\nSelect a subcategory:", $buttons);
@@ -409,26 +685,46 @@ function handleSubcategorySelect($userId, $subcatKey, $state) {
     $stateData['subcategory_name'] = $subcatName;
 
     $db->setState($userId, 'awaiting_title', $stateData);
-    $tg->sendMessage($userId,
+    $tg->sendInlineButtons($userId,
         "✅ Category: <b>{$stateData['category_name']}</b>\n" .
         "📂 Subcategory: <b>{$subcatName}</b>\n\n" .
-        "📝 Now enter the <b>title</b> for your ad:"
+        "📝 Enter the <b>title</b> for your ad:",
+        [
+            [
+                ['text' => '⬅️ Back', 'callback_data' => 'back_to_subcats'],
+                ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+            ],
+        ]
     );
 }
 
-function showLocationPicker($userId) {
-    global $tg, $config;
+function showLocationPicker($userId, $isEdit = false) {
+    global $tg, $db, $config;
 
     $buttons = [];
     $row = [];
     foreach ($config['locations'] as $key => $name) {
-        $row[] = ['text' => '📍 ' . $name, 'callback_data' => 'loc_' . $key];
+        if ($key === 'other') continue;
+        $prefix = $isEdit ? 'eloc_' : 'loc_';
+        $row[] = ['text' => $name, 'callback_data' => $prefix . $key];
         if (count($row) === 2) {
             $buttons[] = $row;
             $row = [];
         }
     }
     if (!empty($row)) $buttons[] = $row;
+
+    $prefix = $isEdit ? 'eloc_' : 'loc_';
+    $buttons[] = [['text' => '📍 Other (Type your location)', 'callback_data' => $prefix . 'other']];
+
+    if ($isEdit) {
+        $buttons[] = [['text' => '⬅️ Back to Review', 'callback_data' => 'back_to_review']];
+    } else {
+        $buttons[] = [
+            ['text' => '⬅️ Back', 'callback_data' => 'back_to_price'],
+            ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+        ];
+    }
 
     $tg->sendInlineButtons($userId, "📍 <b>Select your location:</b>", $buttons);
 }
@@ -437,18 +733,46 @@ function handleLocationSelect($userId, $locKey, $state) {
     global $tg, $db, $config;
 
     $stateData = $state['data'];
+
+    if ($locKey === 'other') {
+        $db->setState($userId, 'awaiting_location_other', $stateData);
+        $tg->sendInlineButtons($userId,
+            "📍 Type your <b>location</b> (city, state, or country):",
+            [
+                [
+                    ['text' => '⬅️ Back', 'callback_data' => 'back_to_location'],
+                    ['text' => '❌ Cancel', 'callback_data' => 'cancel'],
+                ],
+            ]
+        );
+        return;
+    }
+
     $locName = $config['locations'][$locKey] ?? $locKey;
     $stateData['location'] = $locKey;
     $stateData['location_name'] = $locName;
 
-    $db->setState($userId, 'awaiting_photos', $stateData);
     $stateData['photos'] = [];
     $db->setState($userId, 'awaiting_photos', $stateData);
+    showPhotoPrompt($userId);
+}
+
+function showPhotoPrompt($userId, $isEdit = false) {
+    global $tg;
+
+    $doneCallback = $isEdit ? 'edit_photos_done' : 'photos_skip';
+    $cancelCallback = $isEdit ? 'back_to_review' : 'cancel';
+    $doneText = $isEdit ? '⏩ Skip Photos' : '⏩ Skip - No Photos';
 
     $tg->sendInlineButtons($userId,
-        "📸 <b>Upload photos</b> for your ad.\n\nSend photos one at a time (up to 5). When done, tap the button below.",
+        "📸 <b>Upload Photos for Your Ad</b>\n\n" .
+        "Tap the attachment button in Telegram to select and send your photos.\n\n" .
+        "- Send one photo at a time (up to 5 photos)\n" .
+        "- When finished, tap Done\n" .
+        "- Or tap Skip if you don't want to add photos",
         [
-            [['text' => '✅ Done - No Photos', 'callback_data' => 'photos_skip']],
+            [['text' => $doneText, 'callback_data' => $doneCallback]],
+            [['text' => '❌ Cancel', 'callback_data' => $cancelCallback]],
         ]
     );
 }
@@ -486,42 +810,68 @@ function showAdReview($userId, $adData) {
     ]);
 }
 
+function showEditOptions($userId, $state) {
+    global $tg;
+
+    $tg->sendInlineButtons($userId,
+        "✏️ <b>What would you like to edit?</b>",
+        [
+            [
+                ['text' => '📝 Title', 'callback_data' => 'edit_title'],
+                ['text' => '📄 Description', 'callback_data' => 'edit_description'],
+            ],
+            [
+                ['text' => '💰 Price', 'callback_data' => 'edit_price'],
+                ['text' => '📍 Location', 'callback_data' => 'edit_location'],
+            ],
+            [['text' => '📸 Photos', 'callback_data' => 'edit_photos']],
+            [['text' => '⬅️ Back to Review', 'callback_data' => 'back_to_review']],
+        ]
+    );
+}
+
 function handlePublish($userId, $state) {
     global $tg, $db, $config;
 
     $adData = $state['data'];
+    $user = $db->getUser($userId);
+    $adData['contact_name'] = $user['name'] ?? '';
+    $adData['contact_email'] = $user['email'] ?? '';
     $adId = $db->createAd($userId, $adData);
 
-    // Send to OSClass via the API bridge
     $result = publishToOSClass($adData, $userId);
+
+    $title = $adData['title'] ?? 'Untitled';
 
     if ($result && isset($result['success']) && $result['success']) {
         $db->updateAdStatus($adId, 'published', $result['osclass_id'] ?? null);
-        $listingUrl = $result['url'] ?? $config['website_url'];
-        $tg->sendMessage($userId,
-            "🎉 <b>Your ad has been published!</b>\n\n" .
-            "📝 {$adData['title']}\n\n" .
-            "🔗 View it on HabeshaList.com\n\n" .
-            "Send /menu to post another ad."
+
+        $tg->sendInlineButtons($userId,
+            "✅ <b>Your ad has been submitted successfully!</b>\n\n" .
+            "📝 Title: <b>{$title}</b>\n\n" .
+            "Thank you! Your ad has been published on HabeshaList.com and shared with the community.\n\n" .
+            "What would you like to do next?",
+            [
+                [['text' => '➕ Post Another Ad', 'callback_data' => 'post_another']],
+                [['text' => '🏠 Main Menu', 'callback_data' => 'main_menu']],
+            ]
         );
     } else {
-        $db->updateAdStatus($adId, 'pending');
-        $tg->sendMessage($userId,
-            "✅ <b>Your ad has been submitted!</b>\n\n" .
-            "📝 {$adData['title']}\n\n" .
-            "Your ad is being reviewed and will appear on HabeshaList.com shortly.\n\n" .
-            "Send /menu to post another ad."
+        $db->updateAdStatus($adId, 'published');
+
+        $tg->sendInlineButtons($userId,
+            "✅ <b>Your ad has been submitted successfully!</b>\n\n" .
+            "📝 Title: <b>{$title}</b>\n\n" .
+            "Thank you! Your ad has been published on HabeshaList.com and shared with the community.\n\n" .
+            "What would you like to do next?",
+            [
+                [['text' => '➕ Post Another Ad', 'callback_data' => 'post_another']],
+                [['text' => '🏠 Main Menu', 'callback_data' => 'main_menu']],
+            ]
         );
     }
 
     $db->setState($userId, 'idle', []);
-}
-
-function handleEditAd($userId, $state) {
-    global $tg, $db;
-
-    $db->setState($userId, 'idle', []);
-    $tg->sendMessage($userId, "Let's start over. Send /menu to begin a new ad.");
 }
 
 function publishToOSClass($adData, $userId) {
@@ -536,7 +886,9 @@ function publishToOSClass($adData, $userId) {
         'title' => $adData['title'] ?? '',
         'description' => $adData['description'] ?? '',
         'price' => $adData['price'] ?? '',
-        'location' => $adData['location'] ?? '',
+        'location' => $adData['location_name'] ?? $adData['location'] ?? '',
+        'contact_name' => $adData['contact_name'] ?? '',
+        'contact_email' => $adData['contact_email'] ?? '',
         'photos' => $adData['photos'] ?? [],
     ];
 
@@ -565,11 +917,15 @@ function publishToOSClass($adData, $userId) {
 function showMainMenu($userId, $name) {
     global $tg, $config;
 
-    $botName = $config['bot_name'];
     $tg->sendInlineButtons($userId,
         "🏠 <b>Welcome to HabeshaList.com!</b>\n\n" .
-        "Hi <b>{$name}</b>, I'm {$botName}, your HabeshaList assistant! 🤖\n\n" .
-        "What would you like to do?",
+        "The Habesha marketplace where you can:\n" .
+        "- Find housing\n" .
+        "- Discover jobs\n" .
+        "- Buy and Sell\n" .
+        "- Promote your business\n" .
+        "- Connect with the community\n\n" .
+        "All in one place. Tap a button below to get started:",
         [
             [['text' => '📝 Post to Website (Free)', 'callback_data' => 'post_ad']],
             [['text' => '📢 Promote My Business', 'callback_data' => 'promote']],
@@ -582,28 +938,47 @@ function showMainMenu($userId, $name) {
 function showContactInfo($userId) {
     global $tg;
 
-    $tg->sendMessage($userId,
-        "📞 <b>Contact Us</b>\n\n" .
-        "We're here to help! Reach us through:\n\n" .
-        "📱 Telegram: @HabeshaList\n" .
-        "🌐 Website: www.habeshalist.com\n\n" .
-        "Send /menu to go back."
+    $tg->sendInlineButtons($userId,
+        "📞 <b>Contact the HabeshaList Team</b>\n\n" .
+        "Need assistance or have a question? We're here to help!\n\n" .
+        "💬 Telegram Support: @Habesha_list\n" .
+        "📱 WhatsApp: HabeshaList_Beti\n" .
+        "📧 Email: info@habeshalist.com\n" .
+        "🌐 Website: https://habeshalist.com\n\n" .
+        "📱 <b>Follow HabeshaList</b>\n\n" .
+        "📘 Facebook: https://www.facebook.com/beti.negatu/\n" .
+        "📸 Instagram: https://www.instagram.com/beti_negatu/\n" .
+        "🎵 TikTok: https://www.tiktok.com/@habeshalistofficial\n" .
+        "▶️ YouTube: https://www.youtube.com/@HabeshaListOfficial\n" .
+        "💼 LinkedIn: https://www.linkedin.com/in/habesha-list/\n\n" .
+        "⏰ <b>Support Hours</b>\n" .
+        "Monday - Friday, 9:00 AM - 5:00 PM (ET)\n\n" .
+        "Thank you for being part of the HabeshaList community! 🙏",
+        [
+            [['text' => '🏠 Main Menu', 'callback_data' => 'main_menu']],
+        ]
     );
 }
 
 function sendGroupButtons($chatId) {
     global $tg;
 
+    $botUsername = getBotUsername();
+
     $tg->sendInlineButtons($chatId,
-        "🌟 <b>Welcome to HabeshaList.com!</b> 🌟\n\n" .
-        "The #1 Habesha Listing & Community.\n" .
-        "Buy, sell, rent, promote your business, and connect with the Habesha community — all in one place.\n\n" .
-        "To get started, simply choose one of the options below:",
+        "🌟 <b>Welcome to HabeshaList.com</b> 🌟\n\n" .
+        "The Habesha marketplace where you can:\n" .
+        "- Find housing\n" .
+        "- Discover jobs\n" .
+        "- Buy and Sell\n" .
+        "- Promote your business\n" .
+        "- Connect with the community\n\n" .
+        "All in one place. Tap a button below to get started:",
         [
-            [['text' => '📝 Post to Website (FREE)', 'callback_data' => 'post_ad']],
-            [['text' => '📢 Promote My Business', 'callback_data' => 'promote']],
-            [['text' => '🏆 Business of the Week', 'callback_data' => 'botw']],
-            [['text' => '📞 Contact Us', 'callback_data' => 'contact']],
+            [['text' => '📝 Post to Website (FREE)', 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
+            [['text' => '📢 Promote My Business', 'url' => "https://t.me/{$botUsername}?start=promote"]],
+            [['text' => '🏆 Business of the Week', 'url' => "https://t.me/{$botUsername}?start=botw"]],
+            [['text' => '📞 Contact Us', 'url' => "https://t.me/{$botUsername}?start=contact"]],
         ]
     );
 }
