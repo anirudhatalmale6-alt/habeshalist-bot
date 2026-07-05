@@ -126,14 +126,14 @@ function getCategoryId($category, $subcategory) {
     // Or query: SELECT * FROM oc_t_category_description;
 
     $categoryMap = [
-        'housing' => ['_id' => 0, 'rent' => 0, 'sale' => 0, 'shops' => 0, 'other_housing' => 0],
-        'services' => ['_id' => 0, 'beauty' => 0, 'car_repair' => 0, 'babysitter' => 0],
-        'personals' => ['_id' => 0, 'friendship' => 0, 'missed' => 0],
-        'classes' => ['_id' => 0, 'computer' => 0, 'tutoring' => 0],
-        'community' => ['_id' => 0, 'events' => 0, 'donation' => 0],
-        'forsale' => ['_id' => 0, 'cars' => 0, 'ethiopian' => 0, 'electronics' => 0],
-        'jobs' => ['_id' => 0, 'sales' => 0, 'accounting' => 0],
-        'luggage' => ['_id' => 0],
+        'housing' => ['_id' => 4, 'rent' => 4, 'sale' => 4, 'shops' => 4, 'other_housing' => 4],
+        'services' => ['_id' => 5, 'beauty' => 5, 'car_repair' => 5, 'babysitter' => 5, 'electronics_repair' => 5, 'dj_music' => 5, 'doctors' => 5, 'tax_finance' => 5, 'grocery' => 5, 'restaurant' => 5, 'legal' => 5, 'other_services' => 5],
+        'personals' => ['_id' => 7, 'friendship' => 7, 'missed' => 7],
+        'classes' => ['_id' => 3, 'computer' => 3, 'tutoring' => 3],
+        'community' => ['_id' => 6, 'events' => 6, 'donation' => 6],
+        'forsale' => ['_id' => 1, 'cars' => 1, 'ethiopian' => 1, 'electronics' => 1, 'clothing' => 1, 'tickets' => 1],
+        'jobs' => ['_id' => 8, 'sales' => 8, 'accounting' => 8, 'marketing' => 8, 'education' => 8, 'engineering' => 8, 'healthcare' => 8, 'legal_jobs' => 8, 'food_service' => 8, 'technology' => 8],
+        'luggage' => ['_id' => 2],
     ];
 
     if (isset($categoryMap[$category])) {
