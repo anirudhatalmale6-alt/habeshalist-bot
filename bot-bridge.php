@@ -126,14 +126,14 @@ function getCategoryId($category, $subcategory) {
     // Or query: SELECT * FROM oc_t_category_description;
 
     $categoryMap = [
-        'housing' => ['_id' => 4, 'rent' => 4, 'sale' => 4, 'shops' => 4, 'other_housing' => 4],
-        'services' => ['_id' => 5, 'beauty' => 5, 'car_repair' => 5, 'babysitter' => 5, 'electronics_repair' => 5, 'dj_music' => 5, 'doctors' => 5, 'tax_finance' => 5, 'grocery' => 5, 'restaurant' => 5, 'legal' => 5, 'other_services' => 5],
-        'personals' => ['_id' => 7, 'friendship' => 7, 'missed' => 7],
-        'classes' => ['_id' => 3, 'computer' => 3, 'tutoring' => 3],
-        'community' => ['_id' => 6, 'events' => 6, 'donation' => 6],
-        'forsale' => ['_id' => 1, 'cars' => 1, 'ethiopian' => 1, 'electronics' => 1, 'clothing' => 1, 'tickets' => 1],
-        'jobs' => ['_id' => 8, 'sales' => 8, 'accounting' => 8, 'marketing' => 8, 'education' => 8, 'engineering' => 8, 'healthcare' => 8, 'legal_jobs' => 8, 'food_service' => 8, 'technology' => 8],
-        'luggage' => ['_id' => 2],
+        'housing' => ['_id' => 4, 'rent' => 44, 'sale' => 43, 'shops' => 51, 'other_housing' => 49, 'vacation' => 47],
+        'services' => ['_id' => 5, 'beauty' => 52, 'car_repair' => 53, 'babysitter' => 97, 'transportation' => 54, 'electronics_repair' => 55, 'dj_music' => 57, 'doctors' => 58, 'tax_finance' => 60, 'grocery' => 61, 'restaurant' => 11, 'legal' => 96, 'other_services' => 62],
+        'personals' => ['_id' => 7, 'friendship' => 73, 'missed' => 74],
+        'classes' => ['_id' => 3, 'computer' => 38, 'language' => 39, 'tutoring' => 42],
+        'community' => ['_id' => 6, 'events' => 63, 'donation' => 65, 'others' => 66],
+        'forsale' => ['_id' => 1, 'cars' => 12, 'ethiopian' => 13, 'electronics' => 14, 'clothing' => 15, 'tickets' => 27, 'everything_else' => 30],
+        'jobs' => ['_id' => 8, 'sales' => 77, 'accounting' => 75, 'marketing' => 76, 'education' => 80, 'engineering' => 81, 'healthcare' => 82, 'legal_jobs' => 85, 'food_service' => 91, 'technology' => 94, 'other_jobs' => 95],
+        'luggage' => ['_id' => 2, 'bag_delivery' => 31],
     ];
 
     if (isset($categoryMap[$category])) {
