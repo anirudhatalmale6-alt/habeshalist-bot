@@ -37,8 +37,6 @@ if ($action === 'create_listing') {
 }
 
 function createListing($data) {
-    // Load OSClass bootstrap to use its functions
-    // Adjust the path if your OSClass installation is in a subdirectory
     $osclassPath = __DIR__ . '/oc-load.php';
 
     if (!file_exists($osclassPath)) {
@@ -50,8 +48,6 @@ function createListing($data) {
     require_once $osclassPath;
 
     try {
-        // Map bot category/subcategory to OSClass category IDs
-        // This mapping needs to be configured based on your OSClass category IDs
         $categoryId = getCategoryId($data['category'] ?? '', $data['subcategory'] ?? '');
 
         if ($categoryId === null) {
@@ -59,61 +55,103 @@ function createListing($data) {
             return;
         }
 
-        // Get or create user in OSClass
-        $email = '';
-        $contactName = '';
-        // You can extend this to look up the user by telegram_id
+        $title = $data['title'] ?? 'Untitled';
+        $description = $data['description'] ?? '';
+        $priceRaw = $data['price'] ?? '0';
+        $price = floatval(preg_replace('/[^0-9.]/', '', $priceRaw));
+        if (in_array(strtolower($priceRaw), ['free', 'negotiable'])) {
+            $price = 0;
+        }
+        $contactName = $data['contact_name'] ?? 'HabeshaList User';
+        $contactEmail = $data['contact_email'] ?? '';
+        $location = $data['location'] ?? '';
+        $secret = md5(uniqid(rand(), true));
 
-        // Insert the listing using OSClass model
-        $itemData = [
-            'catId' => $categoryId,
-            'title' => $data['title'] ?? 'Untitled',
-            'description' => $data['description'] ?? '',
-            'price' => floatval(preg_replace('/[^0-9.]/', '', $data['price'] ?? '0')),
-            'currency' => 'USD',
-            'contactName' => $data['contact_name'] ?? 'HabeshaList User',
-            'contactEmail' => $data['contact_email'] ?? '',
-        ];
-
-        // Use OSClass Item model to insert
         $item = Item::newInstance();
-        $result = $item->insert([
+        $insertResult = $item->insert([
             'fk_i_user_id' => null,
             'dt_pub_date' => date('Y-m-d H:i:s'),
             'dt_mod_date' => date('Y-m-d H:i:s'),
-            'f_price' => $itemData['price'],
+            'f_price' => $price,
             'fk_c_currency_code' => 'USD',
-            's_contact_name' => $itemData['contactName'],
-            's_contact_email' => $itemData['contactEmail'],
+            's_contact_name' => $contactName,
+            's_contact_email' => $contactEmail,
             'b_enabled' => 1,
             'b_active' => 1,
             'b_spam' => 0,
             'fk_i_category_id' => $categoryId,
+            's_secret' => $secret,
         ]);
 
-        if ($result) {
-            $itemId = $item->dao->insertedId();
-
-            // Insert title and description
-            $item->insertDescription($itemId, 'en_US', $itemData['title'], $itemData['description']);
-
-            // Set location if available
-            if (!empty($data['location'])) {
-                ItemLocation::newInstance()->insert([
-                    'fk_i_item_id' => $itemId,
-                    's_city' => $data['location'],
-                    's_country' => 'US',
-                ]);
-            }
-
-            echo json_encode([
-                'success' => true,
-                'osclass_id' => $itemId,
-                'url' => osc_item_url_from_item(['pk_i_id' => $itemId]),
-            ]);
-        } else {
-            echo json_encode(['success' => false, 'error' => 'Failed to insert listing']);
+        if (!$insertResult) {
+            echo json_encode(['success' => false, 'error' => 'Item insert failed']);
+            return;
         }
+
+        $itemId = $item->dao->insertedId();
+
+        if (!$itemId) {
+            echo json_encode(['success' => false, 'error' => 'Could not get item ID']);
+            return;
+        }
+
+        $prefix = DB_TABLE_PREFIX;
+        $dao = Item::newInstance()->dao;
+        $escTitle = addslashes($title);
+        $escDesc = addslashes($description);
+
+        $dao->query(
+            "INSERT INTO {$prefix}t_item_description (fk_i_item_id, fk_c_locale_code, s_title, s_description) " .
+            "VALUES ({$itemId}, 'en_US', '{$escTitle}', '{$escDesc}')"
+        );
+
+        if (!empty($location)) {
+            $escLoc = addslashes($location);
+            $dao->query(
+                "INSERT INTO {$prefix}t_item_location (fk_i_item_id, s_city, fk_c_country_code, s_country) " .
+                "VALUES ({$itemId}, '{$escLoc}', 'US', 'United States')"
+            );
+        }
+
+        $photos = $data['photos'] ?? [];
+        $botToken = 'REDACTED';
+        $uploadDir = osc_content_path() . 'uploads/';
+
+        foreach ($photos as $idx => $fileId) {
+            $fileInfo = json_decode(file_get_contents("https://api.telegram.org/bot{$botToken}/getFile?file_id={$fileId}"), true);
+            if (!$fileInfo || !$fileInfo['ok']) continue;
+
+            $filePath = $fileInfo['result']['file_path'];
+            $imageData = file_get_contents("https://api.telegram.org/file/bot{$botToken}/{$filePath}");
+            if (!$imageData) continue;
+
+            $ext = pathinfo($filePath, PATHINFO_EXTENSION) ?: 'jpg';
+            $resourceName = $itemId . '_' . $idx;
+            $fileName = $resourceName . '.' . $ext;
+
+            file_put_contents($uploadDir . $fileName, $imageData);
+
+            $dao->query(
+                "INSERT INTO {$prefix}t_item_resource (fk_i_item_id, s_name, s_extension, s_content_type, s_path) " .
+                "VALUES ({$itemId}, '{$resourceName}', '{$ext}', 'image/{$ext}', 'oc-content/uploads/')"
+            );
+
+            $resourceId = $dao->insertedId();
+            $originalName = $resourceName . '_original.' . $ext;
+            copy($uploadDir . $fileName, $uploadDir . $originalName);
+
+            $thumbName = $resourceName . '_thumbnail.' . $ext;
+            copy($uploadDir . $fileName, $uploadDir . $thumbName);
+        }
+
+        if (class_exists('CategoryStats')) {
+            CategoryStats::newInstance()->increaseNumItems($categoryId);
+        }
+
+        echo json_encode([
+            'success' => true,
+            'osclass_id' => $itemId,
+        ]);
 
     } catch (Exception $e) {
         echo json_encode(['success' => false, 'error' => $e->getMessage()]);
