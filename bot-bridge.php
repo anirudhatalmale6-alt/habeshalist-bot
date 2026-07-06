@@ -116,6 +116,7 @@ function createListing($data) {
         $photos = $data['photos'] ?? [];
         $botToken = 'REDACTED';
         $uploadDir = osc_content_path() . 'uploads/';
+        if (!is_dir($uploadDir)) @mkdir($uploadDir, 0755, true);
 
         foreach ($photos as $idx => $fileId) {
             $fileInfo = json_decode(file_get_contents("https://api.telegram.org/bot{$botToken}/getFile?file_id={$fileId}"), true);
@@ -126,22 +127,24 @@ function createListing($data) {
             if (!$imageData) continue;
 
             $ext = pathinfo($filePath, PATHINFO_EXTENSION) ?: 'jpg';
-            $resourceName = $itemId . '_' . $idx;
-            $fileName = $resourceName . '.' . $ext;
-
-            file_put_contents($uploadDir . $fileName, $imageData);
+            $contentType = ($ext === 'png') ? 'image/png' : 'image/jpeg';
 
             $dao->query(
                 "INSERT INTO {$prefix}t_item_resource (fk_i_item_id, s_name, s_extension, s_content_type, s_path) " .
-                "VALUES ({$itemId}, '{$resourceName}', '{$ext}', 'image/{$ext}', 'oc-content/uploads/')"
+                "VALUES ({$itemId}, 'temp', '{$ext}', '{$contentType}', 'oc-content/uploads/')"
+            );
+            $resourceId = $dao->insertedId();
+
+            if (!$resourceId) continue;
+
+            $dao->query(
+                "UPDATE {$prefix}t_item_resource SET s_name = '{$resourceId}' WHERE pk_i_id = {$resourceId}"
             );
 
-            $resourceId = $dao->insertedId();
-            $originalName = $resourceName . '_original.' . $ext;
-            copy($uploadDir . $fileName, $uploadDir . $originalName);
-
-            $thumbName = $resourceName . '_thumbnail.' . $ext;
-            copy($uploadDir . $fileName, $uploadDir . $thumbName);
+            file_put_contents($uploadDir . $resourceId . '.' . $ext, $imageData);
+            copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_original.' . $ext);
+            copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_preview.' . $ext);
+            copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_thumbnail.' . $ext);
         }
 
         if (class_exists('CategoryStats')) {
