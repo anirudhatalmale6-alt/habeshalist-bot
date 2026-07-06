@@ -3,32 +3,24 @@
 return [
     'bot_token' => getenv('TELEGRAM_BOT_TOKEN') ?: 'REDACTED',
 
-    // Secret key for the API bridge
     'api_secret' => getenv('API_SECRET') ?: '717e34f13a2589d049d43149649e2668318e4949712b6f2f7e9cd94e28ad8f07',
 
-    // Your OSClass website URL
     'website_url' => 'https://www.habeshalist.com',
 
-    // API bridge URL (this file lives on your OSClass server)
     'api_bridge_url' => 'https://www.habeshalist.com/bot-bridge.php',
 
-    // Stripe (for paid features in Phase 2)
     'stripe_key' => getenv('STRIPE_KEY') ?: '',
 
-    // Telegram Payment provider token (for Phase 2)
     'payment_provider_token' => getenv('PAYMENT_PROVIDER_TOKEN') ?: '',
 
-    // Admin Telegram user IDs (add your Telegram user ID here)
     'admin_ids' => [702720985],
 
-    // Bot assistant name
     'bot_name' => 'Yohana',
 
-    // Categories matching HabeshaList.com
     'categories' => [
         'housing' => [
             'name' => 'Housing & Real Estate',
-            'icon' => '🏠',
+            'icon' => "\xF0\x9F\x8F\xA0",
             'subcategories' => [
                 'rent' => 'Houses & Rooms for Rent',
                 'sale' => 'Houses - Apartments for Sale',
@@ -39,7 +31,7 @@ return [
         ],
         'services' => [
             'name' => 'Local Services',
-            'icon' => '🔧',
+            'icon' => "\xF0\x9F\x94\xA7",
             'subcategories' => [
                 'beauty' => 'Beauty Salons',
                 'car_repair' => 'Car Repair & Service',
@@ -57,7 +49,7 @@ return [
         ],
         'personals' => [
             'name' => 'Personals',
-            'icon' => '💑',
+            'icon' => "\xF0\x9F\x92\x91",
             'subcategories' => [
                 'friendship' => 'Friendship - Activity Partners',
                 'missed' => 'Missed Connections',
@@ -65,7 +57,7 @@ return [
         ],
         'classes' => [
             'name' => 'Classes',
-            'icon' => '📚',
+            'icon' => "\xF0\x9F\x93\x9A",
             'subcategories' => [
                 'computer' => 'Computer - Multimedia Classes',
                 'language' => 'Language Classes',
@@ -74,7 +66,7 @@ return [
         ],
         'community' => [
             'name' => 'Community',
-            'icon' => '🤝',
+            'icon' => "\xF0\x9F\xA4\x9D",
             'subcategories' => [
                 'events' => 'Community Activities & Events',
                 'donation' => 'Donation to In Needs',
@@ -83,7 +75,7 @@ return [
         ],
         'forsale' => [
             'name' => 'For Sale',
-            'icon' => '🛒',
+            'icon' => "\xF0\x9F\x9B\x92",
             'subcategories' => [
                 'cars' => 'Cars/Trucks',
                 'ethiopian' => 'Ethiopian Products & Services',
@@ -95,7 +87,7 @@ return [
         ],
         'jobs' => [
             'name' => 'Jobs',
-            'icon' => '💼',
+            'icon' => "\xF0\x9F\x92\xBC",
             'subcategories' => [
                 'sales' => 'Sales & Customer Service',
                 'accounting' => 'Accounting - Finance',
@@ -111,36 +103,23 @@ return [
         ],
         'luggage' => [
             'name' => 'Luggage Delivery',
-            'icon' => '✈️',
+            'icon' => "\xE2\x9C\x88\xEF\xB8\x8F",
             'subcategories' => [
                 'bag_delivery' => 'Bag Delivery',
             ],
         ],
     ],
 
-    // Locations matching HabeshaList.com
-    'locations' => [
-        'addis' => 'Addis Ababa, Ethiopia',
-        'dc' => 'Washington D.C., USA',
-        'maryland' => 'Maryland, USA',
-        'virginia' => 'Virginia, USA',
-        'texas' => 'Texas, USA',
-        'california' => 'California, USA',
-        'minnesota' => 'Minnesota, USA',
-        'georgia' => 'Georgia, USA',
-        'colorado' => 'Colorado, USA',
-        'nevada' => 'Nevada, USA',
-        'newyork' => 'New York, USA',
-        'ohio' => 'Ohio, USA',
-        'seattle' => 'Seattle, USA',
-        'canada' => 'Canada',
-        'uk' => 'United Kingdom',
-        'germany' => 'Germany',
-        'sweden' => 'Sweden',
-        'israel' => 'Israel',
-        'uae' => 'UAE',
-        'saudi' => 'Saudi Arabia',
-        'italy' => 'Italy',
-        'other' => 'Other',
+    'countries' => [
+        'et' => ['name' => 'Ethiopia', 'code' => 'ET'],
+        'us' => ['name' => 'United States', 'code' => 'US'],
+        'ca' => ['name' => 'Canada', 'code' => 'CA'],
+        'gb' => ['name' => 'United Kingdom', 'code' => 'GB'],
+        'de' => ['name' => 'Germany', 'code' => 'DE'],
+        'se' => ['name' => 'Sweden', 'code' => 'SE'],
+        'il' => ['name' => 'Israel', 'code' => 'IL'],
+        'ae' => ['name' => 'UAE', 'code' => 'AE'],
+        'sa' => ['name' => 'Saudi Arabia', 'code' => 'SA'],
+        'it' => ['name' => 'Italy', 'code' => 'IT'],
     ],
 ];

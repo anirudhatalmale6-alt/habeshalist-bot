@@ -64,7 +64,6 @@ function createListing($data) {
         }
         $contactName = $data['contact_name'] ?? 'HabeshaList User';
         $contactEmail = $data['contact_email'] ?? '';
-        $location = $data['location'] ?? '';
         $secret = md5(uniqid(rand(), true));
 
         $item = Item::newInstance();
@@ -105,11 +104,21 @@ function createListing($data) {
             "VALUES ({$itemId}, 'en_US', '{$escTitle}', '{$escDesc}')"
         );
 
-        if (!empty($location)) {
-            $escLoc = addslashes($location);
+        $locCountry = $data['country'] ?? '';
+        $locCountryCode = $data['country_code'] ?? '';
+        $locState = $data['state'] ?? '';
+        $locCity = $data['city'] ?? '';
+        $locAddress = $data['address'] ?? '';
+
+        if ($locCountry || $locState || $locCity || $locAddress) {
+            $escCountry = addslashes($locCountry);
+            $escCountryCode = addslashes($locCountryCode ?: '');
+            $escState = addslashes($locState);
+            $escCity = addslashes($locCity);
+            $escAddress = addslashes($locAddress);
             $dao->query(
-                "INSERT INTO {$prefix}t_item_location (fk_i_item_id, s_city, fk_c_country_code, s_country) " .
-                "VALUES ({$itemId}, '{$escLoc}', 'US', 'United States')"
+                "INSERT INTO {$prefix}t_item_location (fk_i_item_id, fk_c_country_code, s_country, s_region, s_city, s_address) " .
+                "VALUES ({$itemId}, '{$escCountryCode}', '{$escCountry}', '{$escState}', '{$escCity}', '{$escAddress}')"
             );
         }
 

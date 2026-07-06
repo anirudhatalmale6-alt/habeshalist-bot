@@ -4,6 +4,8 @@ class Database {
     private $db;
 
     public function __construct($dbPath) {
+        $dir = dirname($dbPath);
+        if (!is_dir($dir)) @mkdir($dir, 0755, true);
         $this->db = new SQLite3($dbPath);
         $this->db->busyTimeout(5000);
         $this->db->exec('PRAGMA journal_mode=WAL');
@@ -56,7 +58,12 @@ class Database {
     }
 
     public function createUser($telegramId, $name, $phone, $email) {
-        $stmt = $this->db->prepare('INSERT INTO users (telegram_id, name, phone, email) VALUES (:tid, :name, :phone, :email)');
+        $existing = $this->getUser($telegramId);
+        if ($existing) {
+            $stmt = $this->db->prepare('UPDATE users SET name = :name, phone = :phone, email = :email WHERE telegram_id = :tid');
+        } else {
+            $stmt = $this->db->prepare('INSERT INTO users (telegram_id, name, phone, email) VALUES (:tid, :name, :phone, :email)');
+        }
         $stmt->bindValue(':tid', $telegramId, SQLITE3_INTEGER);
         $stmt->bindValue(':name', $name, SQLITE3_TEXT);
         $stmt->bindValue(':phone', $phone, SQLITE3_TEXT);
@@ -69,7 +76,7 @@ class Database {
         $stmt->bindValue(':tid', $telegramId, SQLITE3_INTEGER);
         $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
         if ($row) {
-            return ['state' => $row['state'], 'data' => json_decode($row['data'], true)];
+            return ['state' => $row['state'], 'data' => json_decode($row['data'], true) ?: []];
         }
         return ['state' => 'idle', 'data' => []];
     }
@@ -90,7 +97,7 @@ class Database {
         $stmt->bindValue(':title', $adData['title'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':desc', $adData['description'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':price', $adData['price'] ?? '', SQLITE3_TEXT);
-        $stmt->bindValue(':loc', $adData['location'] ?? '', SQLITE3_TEXT);
+        $stmt->bindValue(':loc', $adData['location_name'] ?? $adData['location'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':photos', json_encode($adData['photos'] ?? []), SQLITE3_TEXT);
         $stmt->bindValue(':status', 'pending', SQLITE3_TEXT);
         $stmt->execute();
@@ -101,6 +108,17 @@ class Database {
         $stmt = $this->db->prepare('SELECT * FROM ads WHERE id = :id');
         $stmt->bindValue(':id', $adId, SQLITE3_INTEGER);
         return $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+    }
+
+    public function getUserAds($telegramId) {
+        $stmt = $this->db->prepare('SELECT * FROM ads WHERE telegram_id = :tid ORDER BY created_at DESC LIMIT 10');
+        $stmt->bindValue(':tid', $telegramId, SQLITE3_INTEGER);
+        $result = $stmt->execute();
+        $ads = [];
+        while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+            $ads[] = $row;
+        }
+        return $ads;
     }
 
     public function updateAdStatus($adId, $status, $osclassId = null) {

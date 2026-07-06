@@ -84,6 +84,22 @@ class Telegram {
         return $data;
     }
 
+    public function editMessageReplyMarkup($chatId, $messageId, $replyMarkup = null) {
+        $params = [
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'reply_markup' => $replyMarkup ?: ['inline_keyboard' => []],
+        ];
+        return $this->callApi('editMessageReplyMarkup', $params);
+    }
+
+    public function deleteMessage($chatId, $messageId) {
+        return $this->callApi('deleteMessage', [
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+        ]);
+    }
+
     public function setWebhook($url) {
         return $this->callApi('setWebhook', [
             'url' => $url,
