@@ -54,7 +54,7 @@ function createListing($data) {
         // This mapping needs to be configured based on your OSClass category IDs
         $categoryId = getCategoryId($data['category'] ?? '', $data['subcategory'] ?? '');
 
-        if (!$categoryId) {
+        if ($categoryId === null) {
             echo json_encode(['success' => false, 'error' => 'Category not found']);
             return;
         }
