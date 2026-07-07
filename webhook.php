@@ -375,6 +375,20 @@ function handleMessage($msg) {
         return;
     }
 
+    // /resetme in private chat (admin only) - deletes your own account so you can
+    // test the first-time registration flow again from scratch.
+    if ($isPrivate && $text === '/resetme') {
+        if (isAdmin($userId)) {
+            $db->deleteUser($userId);
+            $db->setState($userId, 'idle', []);
+            $tg->sendMessage($userId,
+                "\xF0\x9F\x94\x84 Your account has been reset. You're now a first-time user again.\n\n" .
+                "Tap <b>Post to Website</b> (or send /start) and you'll be asked to register."
+            );
+        }
+        return;
+    }
+
     // /menu in private chat
     if ($isPrivate && $text === '/menu') {
         $user = $db->getUser($userId);

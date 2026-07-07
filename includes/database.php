@@ -71,6 +71,12 @@ class Database {
         return $stmt->execute();
     }
 
+    public function deleteUser($telegramId) {
+        $stmt = $this->db->prepare('DELETE FROM users WHERE telegram_id = :tid');
+        $stmt->bindValue(':tid', $telegramId, SQLITE3_INTEGER);
+        return $stmt->execute();
+    }
+
     public function getState($telegramId) {
         $stmt = $this->db->prepare('SELECT state, data FROM user_states WHERE telegram_id = :tid');
         $stmt->bindValue(':tid', $telegramId, SQLITE3_INTEGER);
