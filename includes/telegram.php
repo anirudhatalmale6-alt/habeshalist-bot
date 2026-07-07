@@ -51,6 +51,14 @@ class Telegram {
         ]);
     }
 
+    public function sendReplyKeyboard($chatId, $text, $keyboard) {
+        return $this->sendMessage($chatId, $text, [
+            'keyboard' => $keyboard,
+            'resize_keyboard' => true,
+            'one_time_keyboard' => true,
+        ]);
+    }
+
     public function answerCallbackQuery($callbackQueryId, $text = null) {
         $params = ['callback_query_id' => $callbackQueryId];
         if ($text) $params['text'] = $text;
