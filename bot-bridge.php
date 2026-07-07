@@ -32,10 +32,60 @@ if ($action === 'create_listing') {
     createListing($data);
 } elseif ($action === 'register_user') {
     registerUser($data);
+} elseif ($action === 'moderate_item') {
+    moderateItem($data);
 } elseif ($action === 'get_categories') {
     getCategories();
 } else {
     echo json_encode(['success' => false, 'error' => 'Unknown action']);
+}
+
+function moderateItem($data) {
+    $osclassPath = __DIR__ . '/oc-load.php';
+
+    if (!file_exists($osclassPath)) {
+        echo json_encode(['success' => false, 'error' => 'OSClass not found at expected path']);
+        return;
+    }
+
+    define('OC_ADMIN', true);
+    require_once $osclassPath;
+
+    try {
+        $itemId = !empty($data['item_id']) ? (int)$data['item_id'] : 0;
+        $decision = $data['decision'] ?? '';
+
+        if (!$itemId) {
+            echo json_encode(['success' => false, 'error' => 'Missing item id']);
+            return;
+        }
+
+        $item = Item::newInstance()->findByPrimaryKey($itemId);
+        if (!$item) {
+            echo json_encode(['success' => false, 'error' => 'Item not found']);
+            return;
+        }
+
+        $prefix = DB_TABLE_PREFIX;
+        $dao = Item::newInstance()->dao;
+
+        if ($decision === 'approve') {
+            $dao->query("UPDATE {$prefix}t_item SET b_enabled = 1, b_active = 1 WHERE pk_i_id = {$itemId}");
+            if (class_exists('CategoryStats') && !empty($item['fk_i_category_id'])) {
+                CategoryStats::newInstance()->increaseNumItems($item['fk_i_category_id']);
+            }
+            echo json_encode(['success' => true, 'status' => 'approved']);
+        } elseif ($decision === 'reject') {
+            // Keep it hidden from the public; admin can permanently delete from the panel if desired
+            $dao->query("UPDATE {$prefix}t_item SET b_enabled = 0, b_active = 0 WHERE pk_i_id = {$itemId}");
+            echo json_encode(['success' => true, 'status' => 'rejected']);
+        } else {
+            echo json_encode(['success' => false, 'error' => 'Unknown decision']);
+        }
+
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
 }
 
 function registerUser($data) {
@@ -141,6 +191,10 @@ function createListing($data) {
         $osUserId = !empty($data['osclass_user_id']) ? (int)$data['osclass_user_id'] : null;
         $secret = md5(uniqid(rand(), true));
 
+        // Ads posted via the bot start hidden and go live only after admin approval.
+        // Pass "auto_approve": true to publish immediately (kept for flexibility).
+        $enabled = !empty($data['auto_approve']) ? 1 : 0;
+
         $item = Item::newInstance();
         $insertResult = $item->insert([
             'fk_i_user_id' => $osUserId,
@@ -150,7 +204,7 @@ function createListing($data) {
             'fk_c_currency_code' => 'USD',
             's_contact_name' => $contactName,
             's_contact_email' => $contactEmail,
-            'b_enabled' => 1,
+            'b_enabled' => $enabled,
             'b_active' => 1,
             'b_spam' => 0,
             'fk_i_category_id' => $categoryId,
@@ -231,7 +285,8 @@ function createListing($data) {
             copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_thumbnail.' . $ext);
         }
 
-        if (class_exists('CategoryStats')) {
+        // Only count the item in category stats once it is actually live
+        if ($enabled && class_exists('CategoryStats')) {
             CategoryStats::newInstance()->increaseNumItems($categoryId);
         }
 

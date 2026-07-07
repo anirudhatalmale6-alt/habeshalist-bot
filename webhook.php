@@ -341,6 +341,18 @@ function handleCallbackQuery($query) {
     // ---- Post-publish actions ----
 
     if ($data === 'post_another') { showCategoryPicker($userId); return; }
+
+    // ---- Admin moderation ----
+
+    if (strpos($data, 'approve_') === 0) {
+        moderateAd($userId, (int)substr($data, 8), 'approve');
+        return;
+    }
+
+    if (strpos($data, 'reject_') === 0) {
+        moderateAd($userId, (int)substr($data, 7), 'reject');
+        return;
+    }
 }
 
 // ============================================================
@@ -1163,7 +1175,7 @@ function handlePublish($userId, $state) {
     $adData['osclass_user_id'] = $user['osclass_user_id'] ?? null;
 
     // Prevent the "unresponsive" feeling during the OSClass call
-    $tg->sendMessage($userId, "\xE2\x8F\xB3 Publishing your ad, please wait...");
+    $tg->sendMessage($userId, "\xE2\x8F\xB3 Submitting your ad, please wait...");
 
     $adId = $db->createAd($userId, $adData);
 
@@ -1174,29 +1186,119 @@ function handlePublish($userId, $state) {
     $osclassId = null;
     if ($result && isset($result['success']) && $result['success']) {
         $osclassId = $result['osclass_id'] ?? null;
-        $db->updateAdStatus($adId, 'published', $osclassId);
-    } else {
-        $db->updateAdStatus($adId, 'published');
     }
-
-    $buttons = [
-        [['text' => "\xE2\x9E\x95 Post Another Ad", 'callback_data' => 'post_another']],
-    ];
-    if ($osclassId) {
-        $url = $config['website_url'] . '/index.php?page=item&id=' . $osclassId;
-        $buttons[] = [['text' => "\xF0\x9F\x94\x97 View My Ad", 'url' => $url]];
-    }
-    $buttons[] = [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']];
+    // Ad is created hidden and stays 'pending' until an admin approves it
+    $db->updateAdStatus($adId, 'pending', $osclassId);
 
     $tg->sendInlineButtons($userId,
-        "\xE2\x9C\x85 <b>Your ad has been submitted successfully!</b>\n\n" .
+        "\xE2\x9C\x85 <b>Your ad has been submitted for review!</b>\n\n" .
         "\xF0\x9F\x93\x9D Title: <b>{$title}</b>\n\n" .
-        "Thank you! Your ad has been published on HabeshaList.com and shared with the community.\n\n" .
+        "Our team will review it shortly. As soon as it's approved, you'll get a message here and it will go live on HabeshaList.com.\n\n" .
         "What would you like to do next?",
-        $buttons
+        [
+            [['text' => "\xE2\x9E\x95 Post Another Ad", 'callback_data' => 'post_another']],
+            [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
+        ]
     );
 
     $db->setState($userId, 'idle', []);
+
+    // Send the ad to the admin(s) for approval
+    notifyAdminsForReview($adId, $adData, $user);
+}
+
+function notifyAdminsForReview($adId, $adData, $user) {
+    global $tg, $db, $config;
+
+    $ad = $db->getAd($adId);
+    $osclassId = $ad['osclass_id'] ?? null;
+    $poster = $user['name'] ?? ($adData['contact_name'] ?? 'Unknown');
+    $phone = $user['phone'] ?? '';
+    $photos = $adData['photos'] ?? [];
+    $photoCount = count($photos);
+
+    $summary = "\xF0\x9F\x94\x94 <b>New ad awaiting review</b>\n\n" .
+        "\xF0\x9F\x93\x82 Category: <b>{$adData['category_name']}</b>\n" .
+        (isset($adData['subcategory_name']) ? "\xF0\x9F\x93\x81 Subcategory: <b>{$adData['subcategory_name']}</b>\n" : '') .
+        "\xF0\x9F\x93\x9D Title: <b>{$adData['title']}</b>\n" .
+        "\xF0\x9F\x93\x84 {$adData['description']}\n" .
+        "\xF0\x9F\x92\xB0 Price: <b>{$adData['price']}</b>\n" .
+        "\xF0\x9F\x93\x8D Location: <b>{$adData['location_name']}</b>\n" .
+        "\xF0\x9F\x93\xB8 Photos: {$photoCount}\n" .
+        "\xF0\x9F\x91\xA4 Posted by: <b>{$poster}</b>" . ($phone ? " ({$phone})" : '') . "\n\n" .
+        "Approve to publish it, or Reject to keep it hidden.";
+
+    $buttons = [[
+        ['text' => "\xE2\x9C\x85 Approve", 'callback_data' => "approve_{$adId}"],
+        ['text' => "\xE2\x9D\x8C Reject", 'callback_data' => "reject_{$adId}"],
+    ]];
+
+    foreach ($config['admin_ids'] as $adminId) {
+        if (!empty($photos)) {
+            $tg->sendMediaGroup($adminId, $photos);
+        }
+        $tg->sendInlineButtons($adminId, $summary, $buttons);
+    }
+}
+
+function moderateAd($adminId, $adId, $decision) {
+    global $tg, $db, $config;
+
+    if (!isAdmin($adminId)) return;
+
+    $ad = $db->getAd($adId);
+    if (!$ad) {
+        $tg->sendMessage($adminId, "That ad could not be found.");
+        return;
+    }
+    if (($ad['status'] ?? '') !== 'pending') {
+        $tg->sendMessage($adminId, "This ad was already handled (status: {$ad['status']}).");
+        return;
+    }
+
+    $osclassId = $ad['osclass_id'] ?? null;
+    $posterTid = $ad['telegram_id'];
+    $title = $ad['title'] ?: 'your ad';
+
+    if ($osclassId) {
+        moderateOnWebsite($osclassId, $decision);
+    }
+
+    if ($decision === 'approve') {
+        $db->updateAdStatus($adId, 'approved', $osclassId);
+        $tg->sendMessage($adminId, "\xE2\x9C\x85 Approved: <b>{$title}</b> is now live.");
+
+        $btns = [];
+        if ($osclassId) {
+            $btns[] = [['text' => "\xF0\x9F\x94\x97 View My Ad", 'url' => $config['website_url'] . '/index.php?page=item&id=' . $osclassId]];
+        }
+        $btns[] = [['text' => "\xE2\x9E\x95 Post Another Ad", 'callback_data' => 'post_ad']];
+
+        $tg->sendInlineButtons($posterTid,
+            "\xF0\x9F\x8E\x89 Good news! Your ad <b>{$title}</b> has been approved and is now live on HabeshaList.com.",
+            $btns
+        );
+    } else {
+        $db->updateAdStatus($adId, 'rejected', $osclassId);
+        $tg->sendMessage($adminId, "\xE2\x9D\x8C Rejected: <b>{$title}</b> has been kept hidden.");
+
+        $tg->sendInlineButtons($posterTid,
+            "Regarding your ad <b>{$title}</b> \xE2\x80\x94 unfortunately it wasn't approved for posting this time. " .
+            "If you'd like, you can adjust it and post again.",
+            [[['text' => "\xE2\x9E\x95 Post Another Ad", 'callback_data' => 'post_ad']]]
+        );
+    }
+}
+
+function moderateOnWebsite($osclassId, $decision) {
+    global $config;
+
+    return callBridge([
+        'secret' => $config['api_secret'],
+        'action' => 'moderate_item',
+        'item_id' => $osclassId,
+        'decision' => $decision,
+    ], 20);
 }
 
 function publishToOSClass($adData, $userId) {

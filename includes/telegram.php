@@ -59,6 +59,24 @@ class Telegram {
         ]);
     }
 
+    public function sendPhoto($chatId, $fileId, $caption = null) {
+        $params = ['chat_id' => $chatId, 'photo' => $fileId];
+        if ($caption) {
+            $params['caption'] = $caption;
+            $params['parse_mode'] = 'HTML';
+        }
+        return $this->callApi('sendPhoto', $params);
+    }
+
+    public function sendMediaGroup($chatId, $fileIds) {
+        $media = [];
+        foreach ($fileIds as $fid) {
+            $media[] = ['type' => 'photo', 'media' => $fid];
+        }
+        if (empty($media)) return null;
+        return $this->callApi('sendMediaGroup', ['chat_id' => $chatId, 'media' => $media]);
+    }
+
     public function answerCallbackQuery($callbackQueryId, $text = null) {
         $params = ['callback_query_id' => $callbackQueryId];
         if ($text) $params['text'] = $text;
