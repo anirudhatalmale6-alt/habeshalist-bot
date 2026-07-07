@@ -30,10 +30,84 @@ $action = $data['action'] ?? '';
 
 if ($action === 'create_listing') {
     createListing($data);
+} elseif ($action === 'register_user') {
+    registerUser($data);
 } elseif ($action === 'get_categories') {
     getCategories();
 } else {
     echo json_encode(['success' => false, 'error' => 'Unknown action']);
+}
+
+function registerUser($data) {
+    $osclassPath = __DIR__ . '/oc-load.php';
+
+    if (!file_exists($osclassPath)) {
+        echo json_encode(['success' => false, 'error' => 'OSClass not found at expected path']);
+        return;
+    }
+
+    define('OC_ADMIN', true);
+    require_once $osclassPath;
+
+    try {
+        $name  = trim($data['name'] ?? '');
+        $email = trim($data['email'] ?? '');
+        $phone = trim($data['phone'] ?? '');
+
+        if ($email === '') {
+            echo json_encode(['success' => false, 'error' => 'Email required']);
+            return;
+        }
+
+        // Reuse an existing website account with this email if there is one
+        $existing = User::newInstance()->findByEmail($email);
+        if ($existing && !empty($existing['pk_i_id'])) {
+            echo json_encode(['success' => true, 'osclass_user_id' => (int)$existing['pk_i_id'], 'existing' => true]);
+            return;
+        }
+
+        // Users register through Telegram, not the website, so give them a random password
+        $plainPw = bin2hex(random_bytes(8));
+        if (function_exists('osc_hash_password')) {
+            $hash = osc_hash_password($plainPw);
+        } elseif (function_exists('osc_encrypt_password')) {
+            $hash = osc_encrypt_password($plainPw);
+        } else {
+            $hash = sha1($plainPw);
+        }
+        $secret = md5(uniqid(rand(), true));
+
+        $user = User::newInstance();
+        $ok = $user->insert([
+            's_name'      => $name !== '' ? $name : 'HabeshaList User',
+            's_email'     => $email,
+            's_password'  => $hash,
+            's_secret'    => $secret,
+            'b_enabled'   => 1,
+            'b_active'    => 1,
+            'dt_reg_date' => date('Y-m-d H:i:s'),
+        ]);
+
+        if (!$ok) {
+            echo json_encode(['success' => false, 'error' => 'User insert failed']);
+            return;
+        }
+
+        $userId = $user->dao->insertedId();
+
+        // Phone column name varies across OSClass versions — best-effort, never fatal
+        if ($phone !== '' && $userId) {
+            $prefix = DB_TABLE_PREFIX;
+            $dao = User::newInstance()->dao;
+            $escPhone = addslashes($phone);
+            @$dao->query("UPDATE {$prefix}t_user SET s_phone_mobile = '{$escPhone}' WHERE pk_i_id = {$userId}");
+        }
+
+        echo json_encode(['success' => true, 'osclass_user_id' => (int)$userId]);
+
+    } catch (Exception $e) {
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
 }
 
 function createListing($data) {
@@ -64,11 +138,12 @@ function createListing($data) {
         }
         $contactName = $data['contact_name'] ?? 'HabeshaList User';
         $contactEmail = $data['contact_email'] ?? '';
+        $osUserId = !empty($data['osclass_user_id']) ? (int)$data['osclass_user_id'] : null;
         $secret = md5(uniqid(rand(), true));
 
         $item = Item::newInstance();
         $insertResult = $item->insert([
-            'fk_i_user_id' => null,
+            'fk_i_user_id' => $osUserId,
             'dt_pub_date' => date('Y-m-d H:i:s'),
             'dt_mod_date' => date('Y-m-d H:i:s'),
             'f_price' => $price,

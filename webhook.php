@@ -469,6 +469,12 @@ function handleStateInput($userId, $msg) {
                 return;
             }
 
+            // Sync the account to the OSClass website so it shows in the admin panel (best-effort)
+            $reg = registerOnWebsite($stateData['name'], $stateData['phone'], $stateData['email']);
+            if ($reg && !empty($reg['osclass_user_id'])) {
+                $db->setOsclassUserId($userId, $reg['osclass_user_id']);
+            }
+
             $tg->sendMessage($userId,
                 "\xE2\x9C\x85 Account created successfully!\n\n" .
                 "Welcome, <b>{$stateData['name']}</b>! You're all set."
@@ -1154,6 +1160,7 @@ function handlePublish($userId, $state) {
     $user = $db->getUser($userId);
     $adData['contact_name'] = $user['name'] ?? '';
     $adData['contact_email'] = $user['email'] ?? '';
+    $adData['osclass_user_id'] = $user['osclass_user_id'] ?? null;
 
     // Prevent the "unresponsive" feeling during the OSClass call
     $tg->sendMessage($userId, "\xE2\x8F\xB3 Publishing your ad, please wait...");
@@ -1211,15 +1218,35 @@ function publishToOSClass($adData, $userId) {
         'address' => $adData['loc_address'] ?? '',
         'contact_name' => $adData['contact_name'] ?? '',
         'contact_email' => $adData['contact_email'] ?? '',
+        'osclass_user_id' => $adData['osclass_user_id'] ?? null,
         'photos' => $adData['photos'] ?? [],
     ];
+
+    return callBridge($payload, 30);
+}
+
+// Create/find the matching OSClass website account so the user shows in the admin panel
+function registerOnWebsite($name, $phone, $email) {
+    global $config;
+
+    return callBridge([
+        'secret' => $config['api_secret'],
+        'action' => 'register_user',
+        'name' => $name,
+        'phone' => $phone,
+        'email' => $email,
+    ], 15);
+}
+
+function callBridge($payload, $timeout = 30) {
+    global $config;
 
     $ch = curl_init($config['api_bridge_url']);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
     curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+    curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
     $response = curl_exec($ch);
     $error = curl_error($ch);
     curl_close($ch);

@@ -49,6 +49,16 @@ class Database {
                 updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ");
+
+        // Migration: link bot users to their OSClass website account
+        $cols = [];
+        $res = $this->db->query("PRAGMA table_info(users)");
+        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
+            $cols[] = $r['name'];
+        }
+        if (!in_array('osclass_user_id', $cols)) {
+            $this->db->exec("ALTER TABLE users ADD COLUMN osclass_user_id INTEGER");
+        }
     }
 
     public function getUser($telegramId) {
@@ -68,6 +78,13 @@ class Database {
         $stmt->bindValue(':name', $name, SQLITE3_TEXT);
         $stmt->bindValue(':phone', $phone, SQLITE3_TEXT);
         $stmt->bindValue(':email', $email, SQLITE3_TEXT);
+        return $stmt->execute();
+    }
+
+    public function setOsclassUserId($telegramId, $osclassUserId) {
+        $stmt = $this->db->prepare('UPDATE users SET osclass_user_id = :oid WHERE telegram_id = :tid');
+        $stmt->bindValue(':oid', $osclassUserId, SQLITE3_INTEGER);
+        $stmt->bindValue(':tid', $telegramId, SQLITE3_INTEGER);
         return $stmt->execute();
     }
 
