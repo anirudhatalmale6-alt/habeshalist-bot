@@ -3,6 +3,7 @@
 $config = require __DIR__ . '/config/config.php';
 require_once __DIR__ . '/includes/database.php';
 require_once __DIR__ . '/includes/telegram.php';
+require_once __DIR__ . '/includes/promotion.php';
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
@@ -99,6 +100,30 @@ function handleCallbackQuery($query) {
     if ($data === 'promote') { handleAction($userId, 'promote'); return; }
     if ($data === 'botw') { handleAction($userId, 'botw'); return; }
     if ($data === 'contact') { handleAction($userId, 'contact'); return; }
+
+    // ---- Promote My Business ----
+
+    if ($data === 'promo_start') { promoStart($userId); return; }
+    if (strpos($data, 'promopkg_') === 0) { promoSelectPackage($userId, substr($data, 9)); return; }
+    if ($data === 'promo_continue') { promoShowPayment($userId, $state['data']); return; }
+    if ($data === 'promo_payment_back') { promoShowPayment($userId, $state['data']); return; }
+    if (strpos($data, 'promopay_') === 0) { promoHandlePayMethod($userId, substr($data, 9), $state); return; }
+    if ($data === 'promo_paid_manual') { promoPaymentProceed($userId, $state, null); return; }
+    if (strpos($data, 'promocat_') === 0) { promoSelectCategory($userId, (int)substr($data, 9), $state); return; }
+    if ($data === 'promo_images_done' || $data === 'promo_images_skip') { promoImagesDone($userId, $state); return; }
+    if (strpos($data, 'promoskip_') === 0) { promoSkipField($userId, substr($data, 10), $state); return; }
+    if (strpos($data, 'promoback_') === 0) { promoBackField($userId, substr($data, 10), $state); return; }
+    if ($data === 'promo_submit') { promoSubmit($userId, $state); return; }
+    if ($data === 'promo_edit') { promoEditMenu($userId, $state); return; }
+    if (strpos($data, 'promoedit_') === 0) { promoEditField($userId, substr($data, 10), $state); return; }
+    if ($data === 'promo_back_review') { promoBackToReview($userId, $state); return; }
+    if ($data === 'promo_cancel_yes') { promoDoCancel($userId); return; }
+    if ($data === 'promo_cancel_no') { promoRestore($userId, $state); return; }
+    if ($data === 'promo_cancel') { promoConfirmCancel($userId, $state); return; }
+    if (strpos($data, 'promo_approve_') === 0) { promoModerate($userId, (int)substr($data, 14), 'approve'); return; }
+    if (strpos($data, 'promo_reject_') === 0) { promoModerate($userId, (int)substr($data, 13), 'reject'); return; }
+    if ($data === 'promo_admin_menu') { promoAdminMenu($userId); return; }
+    if (strpos($data, 'promoset_') === 0) { promoAdminEdit($userId, substr($data, 9)); return; }
 
     // ---- Category / Subcategory ----
 
@@ -401,6 +426,15 @@ function handleMessage($msg) {
         return;
     }
 
+    // /promoadmin in private chat (admin only) - view & edit package prices and payment handles
+    if ($isPrivate && $text === '/promoadmin') {
+        if (isAdmin($userId)) {
+            $db->setState($userId, 'idle', []);
+            promoAdminMenu($userId);
+        }
+        return;
+    }
+
     // /menu in private chat
     if ($isPrivate && $text === '/menu') {
         $user = $db->getUser($userId);
@@ -422,6 +456,10 @@ function handleMessage($msg) {
 
     // Photo messages in private chat
     if ($isPrivate && isset($msg['photo'])) {
+        $ps = $db->getState($userId);
+        if (strpos($ps['state'], 'promo_') === 0) {
+            if (promoHandlePhoto($userId, $msg)) return;
+        }
         if (handlePhotoMessage($userId, $msg)) return;
     }
 
@@ -441,6 +479,12 @@ function handleStateInput($userId, $msg) {
     $state = $db->getState($userId);
     $text = trim($msg['text'] ?? '');
     $stateData = $state['data'];
+
+    // Route all Promote-My-Business states to the promotion module
+    if (strpos($state['state'], 'promo_') === 0) {
+        promoHandleStateInput($userId, $msg, $state);
+        return;
+    }
 
     switch ($state['state']) {
 
@@ -795,10 +839,11 @@ function handleAction($userId, $action) {
             showCategoryPicker($userId);
             break;
         case 'promote':
-            $tg->sendInlineButtons($userId,
-                "\xF0\x9F\x93\xA2 <b>Promote Your Business</b>\n\nThis feature is coming soon! Stay tuned.",
-                [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]
-            );
+            if (!$db->getUser($userId)) {
+                startRegistration($userId, 'promote');
+                break;
+            }
+            promoStart($userId);
             break;
         case 'botw':
             $tg->sendInlineButtons($userId,

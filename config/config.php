@@ -17,6 +17,80 @@ return [
 
     'bot_name' => 'Yohana',
 
+    // ---- Promote My Business (paid Telegram Group promotion) ----
+    // Structural attributes live here; PRICES are admin-editable at runtime
+    // (stored in the settings table, keyed "price_<packageKey>"). The values
+    // below are only the seed/default prices used until the admin changes them.
+    'promo_packages' => [
+        'one_time' => [
+            'name' => 'One-Time Post',
+            'emoji' => "\xF0\x9F\x93\x8C",
+            'default_price' => 10,
+            'posts_total' => 1,
+            'posts_per_week' => null,   // one-time: pick 1 of the 3 daily slots
+            'duration_days' => null,
+            'pinned' => false,
+            'summary' => "A single promotional post in the HabeshaList Telegram Group. Perfect for a one-off promotion like a grand opening, holiday sale, new product or job opening.",
+            'features' => [
+                '1 promotional post',
+                'Posted once',
+                'No pinned message',
+                'You choose the date & time',
+            ],
+        ],
+        'monthly' => [
+            'name' => 'Monthly Plan',
+            'emoji' => "\xF0\x9F\x93\x85",
+            'default_price' => 50,
+            'posts_total' => 8,
+            'posts_per_week' => 2,
+            'duration_days' => 30,
+            'pinned' => true,
+            'summary' => "Up to 8 promotional posts over one month, spread out (max 2 per week) so the group stays balanced. Includes 1 pinned message (24 hours).",
+            'features' => [
+                'Up to 8 posts per month',
+                '1 pinned message (24h)',
+                'Up to 2 posts per week',
+                'Choose your start date',
+            ],
+        ],
+        'yearly' => [
+            'name' => 'Yearly Plan',
+            'emoji' => "\xF0\x9F\x91\x91",
+            'default_price' => 500,
+            'posts_total' => 96,
+            'posts_per_week' => 2,
+            'duration_days' => 365,
+            'pinned' => true,
+            'summary' => "96 promotional posts per year (8 per month), with 1 pinned message each month. Unused posts roll over to the following months. Book up to 30 days in advance.",
+            'features' => [
+                '96 posts per year (8 per month)',
+                '1 pinned message monthly',
+                'Up to 2 posts per week',
+                'Unused posts roll over',
+                'Book up to 30 days ahead',
+            ],
+        ],
+    ],
+
+    // Order the packages appear in the picker
+    'promo_package_order' => ['one_time', 'monthly', 'yearly'],
+
+    // Business categories for the promotion ad form
+    'business_categories' => [
+        'Retail', 'Restaurant & Food', 'Services', 'Health & Medical',
+        'Beauty & Salon', 'Automotive', 'Real Estate', 'Education',
+        'Technology', 'Events', 'Travel', 'Other',
+    ],
+
+    // Payment handles shown for manual payment. These are admin-editable at
+    // runtime via the settings table (keys pay_zelle / pay_cashapp / pay_support).
+    'payment_defaults' => [
+        'pay_zelle' => '',      // e.g. habeshalist@email.com or a phone number
+        'pay_cashapp' => '',    // e.g. $HabeshaList
+        'pay_support' => '@Habesha_list',
+    ],
+
     'categories' => [
         'housing' => [
             'name' => 'Housing & Real Estate',
