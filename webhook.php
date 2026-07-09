@@ -12,24 +12,37 @@ if (!isset($tg)) $tg = new Telegram($config['bot_token']);
 // Only dispatch incoming updates when served over HTTP (skipped under CLI tests).
 if (php_sapi_name() !== 'cli') {
     $input = file_get_contents('php://input');
-    $update = json_decode($input, true);
 
-    if (!$update) {
-        http_response_code(200);
-        exit;
-    }
-
-    if (isset($update['callback_query'])) {
-        handleCallbackQuery($update['callback_query']);
-        exit;
-    }
-
-    if (isset($update['message'])) {
-        handleMessage($update['message']);
-        exit;
-    }
-
+    // Acknowledge Telegram INSTANTLY (HTTP 200) and close the connection before
+    // doing any work. Telegram only needs a fast 200 from the webhook; the reply
+    // to the user is delivered via separate outbound API calls, not this response
+    // body. Finishing the request up front keeps every hit to a few milliseconds,
+    // so many users tapping at the same moment can't pile up open connections or
+    // trip the host's concurrency / security limits (the cause of the earlier
+    // "409 Conflict" backlog that made the bot go silent).
+    ignore_user_abort(true);
     http_response_code(200);
+    header('Content-Type: text/plain');
+    header('Content-Length: 0');
+    header('Connection: close');
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();          // PHP-FPM
+    } elseif (function_exists('litespeed_finish_request')) {
+        litespeed_finish_request();        // LiteSpeed (Bluehost)
+    } else {
+        while (ob_get_level() > 0) { ob_end_flush(); }
+        flush();
+    }
+
+    // Now do the real work, with the client already disconnected.
+    $update = json_decode($input, true);
+    if ($update) {
+        if (isset($update['callback_query'])) {
+            handleCallbackQuery($update['callback_query']);
+        } elseif (isset($update['message'])) {
+            handleMessage($update['message']);
+        }
+    }
     exit;
 }
 
