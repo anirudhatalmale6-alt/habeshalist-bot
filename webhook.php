@@ -846,10 +846,11 @@ function handleAction($userId, $action) {
             promoStart($userId);
             break;
         case 'botw':
-            $tg->sendInlineButtons($userId,
-                "\xF0\x9F\x8F\x86 <b>Business of the Week</b>\n\nThis feature is coming soon! Stay tuned.",
-                [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]
-            );
+            if (!$db->getUser($userId)) {
+                startRegistration($userId, 'botw');
+                break;
+            }
+            promoStartBotw($userId);
             break;
         case 'contact':
             showContactInfo($userId);

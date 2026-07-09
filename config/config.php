@@ -71,9 +71,33 @@ return [
                 'Book up to 30 days ahead',
             ],
         ],
+
+        // Business of the Week - its OWN main-menu button (NOT part of the
+        // package picker above). Strictly one exclusive business per week,
+        // featured & pinned for the full 7 days. Bookable up to 4 weeks ahead.
+        // Reuses the same payment / ad form / approval engine as the packages.
+        'botw' => [
+            'name' => 'Business of the Week',
+            'emoji' => "\xF0\x9F\x8F\x86",
+            'default_price' => 75,
+            'posts_total' => 1,
+            'posts_per_week' => null,
+            'duration_days' => 7,
+            'pinned' => true,
+            'exclusive' => true,        // only one business can hold the week
+            'booking_weeks_ahead' => 4, // users can book up to 4 weeks in advance
+            'summary' => "Be THE featured business of the week in the HabeshaList Telegram Group. Only one business is featured each week, so you get the spotlight all to yourself - a pinned feature post kept at the top of the group for all 7 days.",
+            'features' => [
+                'Exclusive - only 1 business per week',
+                'Featured & pinned for the full 7 days',
+                'Top-of-group visibility all week',
+                'Book up to 4 weeks in advance',
+            ],
+        ],
     ],
 
-    // Order the packages appear in the picker
+    // Order the packages appear in the picker (Business of the Week is
+    // intentionally excluded - it has its own dedicated menu button).
     'promo_package_order' => ['one_time', 'monthly', 'yearly'],
 
     // Business categories for the promotion ad form

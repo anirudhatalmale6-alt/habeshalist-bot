@@ -97,6 +97,14 @@ function promoStart($userId) {
     );
 }
 
+// Entry point for the Business of the Week main-menu button. It reuses the
+// exact same package-details -> payment -> form -> approval flow; the only
+// difference is which "package" it selects and that Back returns to the main
+// menu (there is no package picker behind it).
+function promoStartBotw($userId) {
+    promoSelectPackage($userId, 'botw');
+}
+
 function promoSelectPackage($userId, $key) {
     global $tg, $db;
 
@@ -116,6 +124,9 @@ function promoSelectPackage($userId, $key) {
         $features .= "\xE2\x9C\x85 {$f}\n";
     }
 
+    // Business of the Week has no package picker behind it, so Back goes home.
+    $backCb = ($key === 'botw') ? 'main_menu' : 'promo_start';
+
     $tg->sendInlineButtons($userId,
         $pkg['emoji'] . " <b>{$pkg['name']} - " . promoFmtPrice($price) . "</b>\n\n" .
         $pkg['summary'] . "\n\n" .
@@ -124,7 +135,7 @@ function promoSelectPackage($userId, $key) {
         [
             [['text' => "\xE2\x9C\x85 Continue", 'callback_data' => 'promo_continue']],
             [
-                ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'promo_start'],
+                ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => $backCb],
                 ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
             ],
         ]
@@ -885,6 +896,9 @@ function promoAdminMenu($userId) {
         $pkg = promoPackage($key);
         $lines .= "- {$pkg['name']}: <b>" . promoFmtPrice(promoPrice($key)) . "</b>\n";
     }
+    if (promoPackage('botw')) {
+        $lines .= "- " . promoPackage('botw')['name'] . ": <b>" . promoFmtPrice(promoPrice('botw')) . "</b>\n";
+    }
     $zelle = $db->getSetting('pay_zelle', $config['payment_defaults']['pay_zelle']);
     $cashapp = $db->getSetting('pay_cashapp', $config['payment_defaults']['pay_cashapp']);
     $lines .= "\n<b>Payment handles:</b>\n";
@@ -895,6 +909,7 @@ function promoAdminMenu($userId) {
         [['text' => "Edit One-Time Price", 'callback_data' => 'promoset_price_one_time']],
         [['text' => "Edit Monthly Price", 'callback_data' => 'promoset_price_monthly']],
         [['text' => "Edit Yearly Price", 'callback_data' => 'promoset_price_yearly']],
+        [['text' => "Edit Business of the Week Price", 'callback_data' => 'promoset_price_botw']],
         [['text' => "Edit Zelle handle", 'callback_data' => 'promoset_pay_zelle']],
         [['text' => "Edit Cash App handle", 'callback_data' => 'promoset_pay_cashapp']],
         [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
@@ -905,7 +920,7 @@ function promoAdminEdit($userId, $settingKey) {
     global $tg, $db, $config;
     if (!isAdmin($userId)) return;
 
-    $allowed = ['price_one_time', 'price_monthly', 'price_yearly', 'pay_zelle', 'pay_cashapp'];
+    $allowed = ['price_one_time', 'price_monthly', 'price_yearly', 'price_botw', 'pay_zelle', 'pay_cashapp'];
     if (!in_array($settingKey, $allowed, true)) return;
 
     $db->setState($userId, 'promo_admin_set', ['setting_key' => $settingKey]);
