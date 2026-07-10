@@ -1,26 +1,14 @@
-# Telegram delivers updates by POSTing JSON to webhook.php from its own
-# server IP ranges. Bluehost's ModSecurity / WAF was flagging those requests
-# as suspicious and rejecting them (returning "409 Conflict" / "406"), so
-# Telegram could not hand any update to the bot and it went silent.
-#
-# This disables the WAF for THIS ONE endpoint only. It is safe: webhook.php
-# accepts nothing but Telegram's JSON and validates every field in PHP, and
-# the rest of the site keeps full ModSecurity protection.
-#
-# If the bot URL ever shows a 500 Internal Server Error after adding this
-# file, this host doesn't allow the directive in .htaccess - just delete the
-# file and use the cPanel "ModSecurity" toggle for the bot folder instead.
-
 # Keep URL rewriting off for this folder so the site's pretty-URL rewrite
 # rules (inherited from the parent .htaccess) never touch webhook.php.
 RewriteEngine Off
 
-<Files "webhook.php">
-    <IfModule mod_security2.c>
-        SecRuleEngine Off
-    </IfModule>
-    <IfModule mod_security.c>
-        SecFilterEngine Off
-        SecFilterScanPOST Off
-    </IfModule>
-</Files>
+# NOTE on the firewall (ModSecurity):
+# Telegram delivers updates by POSTing JSON to webhook.php from its own server
+# IPs. Bluehost's ModSecurity was rejecting those POSTs (409 Conflict), which
+# made the bot go silent. We tried disabling ModSecurity from here with
+# "SecRuleEngine Off", but this host does NOT allow that directive inside
+# .htaccess and returned a 500 Internal Server Error for the whole folder.
+# So ModSecurity must be turned off for this site via cPanel instead:
+#   cPanel  ->  Security  ->  ModSecurity  ->  set habeshalist.com to Off (Disable)
+# (or ask Bluehost support to whitelist Telegram's ranges 149.154.160.0/20 and
+# 91.108.4.0/22 for /bot/ if you prefer to keep ModSecurity on for the site.)
