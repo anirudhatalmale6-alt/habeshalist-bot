@@ -9,6 +9,12 @@ return [
 
     'api_bridge_url' => 'https://www.habeshalist.com/bot-bridge.php',
 
+    // Shared secret Telegram sends back in the X-Telegram-Bot-Api-Secret-Token
+    // header on every webhook request. webhook.php rejects any request whose
+    // header doesn't match, so only Telegram can reach the bot even with the
+    // server firewall relaxed for this endpoint.
+    'webhook_secret' => getenv('WEBHOOK_SECRET') ?: '73c06d2b54a73d0f2e1c24341e5d80b88920b3fa49f039e8f3bed982f17a9c1f',
+
     'stripe_key' => getenv('STRIPE_KEY') ?: '',
 
     'payment_provider_token' => getenv('PAYMENT_PROVIDER_TOKEN') ?: '',

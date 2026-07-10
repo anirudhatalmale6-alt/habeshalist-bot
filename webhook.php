@@ -11,6 +11,18 @@ if (!isset($tg)) $tg = new Telegram($config['bot_token']);
 
 // Only dispatch incoming updates when served over HTTP (skipped under CLI tests).
 if (php_sapi_name() !== 'cli') {
+    // Verify the request really comes from Telegram. Telegram echoes our
+    // configured secret in this header on every webhook call; anything else
+    // (a random bot/scanner hitting the URL) is rejected before we do any work.
+    // This is what keeps the endpoint safe even though the server firewall is
+    // relaxed for it.
+    $expectedSecret = $config['webhook_secret'] ?? '';
+    $gotSecret = $_SERVER['HTTP_X_TELEGRAM_BOT_API_SECRET_TOKEN'] ?? '';
+    if ($expectedSecret !== '' && !hash_equals($expectedSecret, $gotSecret)) {
+        http_response_code(403);
+        exit;
+    }
+
     $input = file_get_contents('php://input');
 
     // Acknowledge Telegram INSTANTLY (HTTP 200) and close the connection before
