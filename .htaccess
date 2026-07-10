@@ -1,0 +1,22 @@
+# Telegram delivers updates by POSTing JSON to webhook.php from its own
+# server IP ranges. Bluehost's ModSecurity / WAF was flagging those requests
+# as suspicious and rejecting them (returning "409 Conflict" / "406"), so
+# Telegram could not hand any update to the bot and it went silent.
+#
+# This disables the WAF for THIS ONE endpoint only. It is safe: webhook.php
+# accepts nothing but Telegram's JSON and validates every field in PHP, and
+# the rest of the site keeps full ModSecurity protection.
+#
+# If the bot URL ever shows a 500 Internal Server Error after adding this
+# file, this host doesn't allow the directive in .htaccess - just delete the
+# file and use the cPanel "ModSecurity" toggle for the bot folder instead.
+
+<Files "webhook.php">
+    <IfModule mod_security2.c>
+        SecRuleEngine Off
+    </IfModule>
+    <IfModule mod_security.c>
+        SecFilterEngine Off
+        SecFilterScanPOST Off
+    </IfModule>
+</Files>
