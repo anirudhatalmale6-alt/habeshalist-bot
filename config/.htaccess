@@ -1,0 +1,10 @@
+# Deny all direct web access to this directory. The bot reads these files
+# server-side (filesystem), never over HTTP, so this has no effect on the bot
+# but keeps them private even if the firewall (ModSecurity) is off.
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>

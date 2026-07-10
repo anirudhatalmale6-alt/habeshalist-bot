@@ -2,13 +2,28 @@
 # rules (inherited from the parent .htaccess) never touch webhook.php.
 RewriteEngine Off
 
+# Don't allow the folder contents to be browsed as a directory listing.
+Options -Indexes
+
+# --- Protect sensitive files from being downloaded over the web ---
+# Blocks the .env secrets file, any dotfile, and stray data files (the SQLite
+# database, lock/offset files, logs) from public HTTP access. This is standard
+# Apache access control, NOT a firewall rule, so it keeps working even when
+# ModSecurity is disabled for this folder. The bot itself reads these files
+# from disk (server-side), so blocking web access has zero effect on it.
+<FilesMatch "(^\.|\.(sqlite|sqlite3|db|offset|lock|log)$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
 # NOTE on the firewall (ModSecurity):
-# Telegram delivers updates by POSTing JSON to webhook.php from its own server
-# IPs. Bluehost's ModSecurity was rejecting those POSTs (409 Conflict), which
-# made the bot go silent. We tried disabling ModSecurity from here with
-# "SecRuleEngine Off", but this host does NOT allow that directive inside
-# .htaccess and returned a 500 Internal Server Error for the whole folder.
-# So ModSecurity must be turned off for this site via cPanel instead:
-#   cPanel  ->  Security  ->  ModSecurity  ->  set habeshalist.com to Off (Disable)
-# (or ask Bluehost support to whitelist Telegram's ranges 149.154.160.0/20 and
-# 91.108.4.0/22 for /bot/ if you prefer to keep ModSecurity on for the site.)
+# Telegram's inbound webhook POSTs are blocked by this host's ModSecurity
+# (409). We are currently running in pull mode (poll.php via cron) to bypass
+# that. If ModSecurity is later disabled for /bot/, disable it via cPanel
+# (Security -> ModSecurity), NOT with a "SecRuleEngine Off" line here - this
+# host rejects that directive inside .htaccess and returns a 500 for the folder.
