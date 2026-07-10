@@ -1,9 +1,67 @@
 <?php
 
-return [
-    'bot_token' => getenv('TELEGRAM_BOT_TOKEN') ?: 'REDACTED',
+/**
+ * Secrets (bot token, webhook secret, API secret, Stripe key) are NEVER
+ * hardcoded in this file. They are read strictly from the environment.
+ *
+ * On shared hosting where you can't set OS-level environment variables, put
+ * them in a plain ".env" file at the app root (one KEY=value per line). That
+ * file is git-ignored so the secrets never land in the repo. See .env.example.
+ *
+ * If a required secret is missing the app fails loudly (HTTP 500 + error log)
+ * instead of running half-configured.
+ */
 
-    'api_secret' => getenv('API_SECRET') ?: '717e34f13a2589d049d43149649e2668318e4949712b6f2f7e9cd94e28ad8f07',
+// --- optional .env loader: KEY=value per line, "#" comments allowed ---
+$envFile = __DIR__ . '/../.env';
+if (is_readable($envFile)) {
+    foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) {
+            continue;
+        }
+        list($k, $v) = explode('=', $line, 2);
+        $k = trim($k);
+        $v = trim($v);
+        // strip optional surrounding quotes
+        if (strlen($v) >= 2 && ($v[0] === '"' || $v[0] === "'") && substr($v, -1) === $v[0]) {
+            $v = substr($v, 1, -1);
+        }
+        if ($k !== '' && getenv($k) === false && !isset($_SERVER[$k])) {
+            putenv("$k=$v");
+            $_SERVER[$k] = $v;
+        }
+    }
+}
+
+// Read an env var from getenv() or the server array (covers .env, real OS env,
+// and Apache/LiteSpeed SetEnv), falling back to $default when unset/blank.
+$env = function (string $key, string $default = '') {
+    $val = getenv($key);
+    if ($val === false || $val === '') {
+        $val = $_SERVER[$key] ?? $default;
+    }
+    return $val;
+};
+
+// Required secrets — no hardcoded fallback. Fail loudly if any is absent so a
+// misconfigured deploy is obvious instead of a silently broken bot.
+$missing = [];
+foreach (['TELEGRAM_BOT_TOKEN', 'WEBHOOK_SECRET', 'API_SECRET'] as $key) {
+    if ($env($key) === '') {
+        $missing[] = $key;
+    }
+}
+if ($missing && php_sapi_name() !== 'cli') {
+    error_log('HabeshaList bot: missing required environment variables: ' . implode(', ', $missing));
+    http_response_code(500);
+    exit;
+}
+
+return [
+    'bot_token' => $env('TELEGRAM_BOT_TOKEN'),
+
+    'api_secret' => $env('API_SECRET'),
 
     'website_url' => 'https://www.habeshalist.com',
 
@@ -13,11 +71,11 @@ return [
     // header on every webhook request. webhook.php rejects any request whose
     // header doesn't match, so only Telegram can reach the bot even with the
     // server firewall relaxed for this endpoint.
-    'webhook_secret' => getenv('WEBHOOK_SECRET') ?: '73c06d2b54a73d0f2e1c24341e5d80b88920b3fa49f039e8f3bed982f17a9c1f',
+    'webhook_secret' => $env('WEBHOOK_SECRET'),
 
-    'stripe_key' => getenv('STRIPE_KEY') ?: '',
+    'stripe_key' => $env('STRIPE_KEY'),
 
-    'payment_provider_token' => getenv('PAYMENT_PROVIDER_TOKEN') ?: '',
+    'payment_provider_token' => $env('PAYMENT_PROVIDER_TOKEN'),
 
     'admin_ids' => [702720985],
 
