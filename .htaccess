@@ -11,6 +11,10 @@
 # file, this host doesn't allow the directive in .htaccess - just delete the
 # file and use the cPanel "ModSecurity" toggle for the bot folder instead.
 
+# Keep URL rewriting off for this folder so the site's pretty-URL rewrite
+# rules (inherited from the parent .htaccess) never touch webhook.php.
+RewriteEngine Off
+
 <Files "webhook.php">
     <IfModule mod_security2.c>
         SecRuleEngine Off
