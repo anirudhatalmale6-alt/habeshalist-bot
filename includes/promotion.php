@@ -222,15 +222,16 @@ function promoHandlePayMethod($userId, $method, $state) {
 
     $msg = "\xF0\x9F\x92\xB3 <b>Pay {$price} via {$methodName}</b>\n\n";
     if (!empty($handle)) {
-        $msg .= "Send your payment to:\n<b>{$handle}</b>\n\n";
+        $msg .= "Please send payment to:\n<b>{$handle}</b>\n\n";
     } else {
         $msg .= "Please contact {$support} to get the {$methodName} payment details.\n\n";
     }
-    $msg .= "After paying, send a <b>screenshot</b> of your payment confirmation right here in the chat and we'll verify it.";
+    $msg .= "After completing your payment, please send a <b>screenshot</b> of your payment confirmation to {$support}.\n\n";
+    $msg .= "Once you have sent the screenshot, tap <b>Submit Payment Proof</b> below.";
 
     $db->setState($userId, 'promo_awaiting_payment_proof', $data);
     $tg->sendInlineButtons($userId, $msg, [
-        [['text' => "\xE2\x9C\x85 I've sent it to {$support}", 'callback_data' => 'promo_paid_manual']],
+        [['text' => "\xF0\x9F\x93\xA4 Submit Payment Proof", 'callback_data' => 'promo_paid_manual']],
         [
             ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'promo_payment_back'],
             ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
