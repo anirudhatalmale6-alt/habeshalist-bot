@@ -14,7 +14,7 @@ hl_session_start();
 if (hl_is_configured()) {
     hl_head('Setup');
     hl_flash('The admin account is already set up. Please log in.', 'err');
-    echo '<p><a class="btn" href="login.php">Go to login</a></p>';
+    echo '<p><a class="btn" href="signin.php">Go to login</a></p>';
     hl_foot();
     exit;
 }

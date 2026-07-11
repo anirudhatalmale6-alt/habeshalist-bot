@@ -122,7 +122,7 @@ function hl_is_logged_in() {
 
 function hl_require_login() {
     if (!hl_is_logged_in()) {
-        header('Location: login.php');
+        header('Location: signin.php');
         exit;
     }
 }

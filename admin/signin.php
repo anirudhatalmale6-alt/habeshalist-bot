@@ -1,6 +1,8 @@
 <?php
 /**
- * login.php - admin sign in. Includes a small brute-force delay.
+ * signin.php - admin sign in. Includes a small brute-force delay.
+ * (Named "signin" rather than "login" because some shared-host WAFs block the
+ * literal filename login.php.)
  */
 require __DIR__ . '/lib.php';
 require __DIR__ . '/view.php';
