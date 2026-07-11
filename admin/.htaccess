@@ -1,0 +1,28 @@
+# HabeshaList admin panel - directory rules.
+
+# No directory listing.
+Options -Indexes
+
+# Block the shared include files from being requested directly in a browser.
+# (They only define functions and output nothing, but there's no reason to
+# expose them.) The actual pages - index/login/logout/setup - stay reachable.
+<FilesMatch "^(lib|view|reset-password)\.php$">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
+
+# Never serve stray sensitive files if any ever land here.
+<FilesMatch "(^\.|\.(sqlite|sqlite3|db|log|bak)$)">
+    <IfModule mod_authz_core.c>
+        Require all denied
+    </IfModule>
+    <IfModule !mod_authz_core.c>
+        Order allow,deny
+        Deny from all
+    </IfModule>
+</FilesMatch>
