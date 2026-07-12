@@ -14,6 +14,11 @@ is **not affected** by the ModSecurity / polling situation on the bot side.
 - Edit payment handles: Zelle, Cash App, Support contact.
 - Dashboard stats: users, ads, promotions, pending review, approved revenue.
 - Recent promotions list (read-only for now).
+- Keys page: update the Telegram bot token / Stripe key from the browser. Values
+  are encrypted at rest (AES-256-GCM) using a master key `HL_APP_KEY` that lives
+  only in the bot's `.env`, and the bot always falls back to the plain `.env`
+  value, so this can never break the bot. A new bot token is verified against
+  Telegram before it is saved.
 
 Everything is plain PHP + SQLite - the same stack the bot already runs on. No
 libraries, no build step, no external services.
@@ -49,6 +54,20 @@ libraries, no build step, no external services.
 - The panel does not expose the database or any secrets over the web.
 - Forgot the password? Run `php reset-password.php` over SSH (or ask me for a
   one-liner), then set a new one via the setup page.
+
+## Enabling the Keys page (encrypted key storage)
+
+The Keys page needs a one-time master key in the bot's `.env`. Generate one
+(over SSH / cPanel Terminal):
+
+```
+php -r "echo base64_encode(random_bytes(32)).PHP_EOL;"
+```
+
+Paste the output into `.env` as `HL_APP_KEY=...`, then upload the updated
+`config/config.php`. Until `HL_APP_KEY` is set, the Keys page simply shows a
+"one quick setup step" note and the bot keeps using the plain `.env` values -
+nothing breaks.
 
 ## Coming next (optional future milestones)
 

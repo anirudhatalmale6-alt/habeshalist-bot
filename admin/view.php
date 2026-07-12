@@ -51,6 +51,11 @@ function hl_head($title, $loggedIn = false) {
   button:hover,.btn:hover{background:var(--accent)}
   .btn.ghost{background:transparent;border:1px solid var(--line);color:var(--text)}
   .btn.ghost:hover{background:var(--chip)}
+  .nav{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .navlink{padding:8px 12px;border-radius:8px;font-size:14px;font-weight:600;
+    color:var(--text);text-decoration:none}
+  .navlink:hover{background:var(--chip)}
+  .navlink[aria-current]{background:var(--chip);color:var(--accent)}
   .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:6px}
   .stat{background:var(--chip);border:1px solid var(--line);border-radius:10px;padding:14px}
   .stat .n{font-size:24px;font-weight:700}
@@ -79,7 +84,14 @@ function hl_head($title, $loggedIn = false) {
 
 HTML;
     if ($loggedIn) {
-        echo '  <a class="btn ghost" href="logout.php">Log out</a>' . "\n";
+        $cur = basename($_SERVER['SCRIPT_NAME'] ?? '');
+        $dashCur = ($cur === 'index.php') ? ' aria-current="page"' : '';
+        $keysCur = ($cur === 'secrets.php') ? ' aria-current="page"' : '';
+        echo '  <nav class="nav">';
+        echo '<a class="navlink"' . $dashCur . ' href="index.php">Dashboard</a>';
+        echo '<a class="navlink"' . $keysCur . ' href="secrets.php">Keys</a>';
+        echo '<a class="btn ghost" href="logout.php">Log out</a>';
+        echo "</nav>\n";
     }
     echo "</header>\n";
 }

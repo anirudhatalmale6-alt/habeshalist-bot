@@ -58,7 +58,7 @@ if ($missing && php_sapi_name() !== 'cli') {
     exit;
 }
 
-return [
+$config = [
     'bot_token' => $env('TELEGRAM_BOT_TOKEN'),
 
     'api_secret' => $env('API_SECRET'),
@@ -285,3 +285,59 @@ return [
         'it' => ['name' => 'Italy', 'code' => 'IT'],
     ],
 ];
+
+/**
+ * Optional: encrypted secret overrides managed from the web admin panel.
+ *
+ * If HL_APP_KEY (a 32-byte base64 master key) is present in the environment and
+ * the settings table holds an encrypted value under a sec_* key, decrypt it and
+ * use it in place of the .env value. This is what lets the bot token / Stripe
+ * key be changed from the browser panel without editing files.
+ *
+ * Deliberately ADDITIVE and fail-safe: any problem (no master key, no DB, no
+ * openssl, bad ciphertext) silently leaves the .env value in place, so this
+ * block can never break a working bot.
+ */
+if (function_exists('openssl_decrypt')) {
+    $appKeyB64 = $env('HL_APP_KEY');
+    $appKey = $appKeyB64 !== '' ? base64_decode($appKeyB64, true) : false;
+    if ($appKey !== false && strlen($appKey) === 32) {
+        $secDbPath = __DIR__ . '/../data/bot.sqlite';
+        if (class_exists('SQLite3') && is_readable($secDbPath)) {
+            try {
+                $secDb = new SQLite3($secDbPath, SQLITE3_OPEN_READONLY);
+                $secDb->busyTimeout(3000);
+                $secMap = [
+                    'sec_bot_token'              => 'bot_token',
+                    'sec_stripe_key'            => 'stripe_key',
+                    'sec_payment_provider_token' => 'payment_provider_token',
+                    'sec_webhook_secret'        => 'webhook_secret',
+                    'sec_api_secret'            => 'api_secret',
+                ];
+                foreach ($secMap as $sk => $ck) {
+                    $stmt = $secDb->prepare('SELECT value FROM settings WHERE key = :k');
+                    $stmt->bindValue(':k', $sk, SQLITE3_TEXT);
+                    $res = $stmt->execute();
+                    $row = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
+                    if ($row && !empty($row['value']) && strpos($row['value'], 'v1:') === 0) {
+                        $raw = base64_decode(substr($row['value'], 3), true);
+                        if ($raw !== false && strlen($raw) >= 28) {
+                            $iv = substr($raw, 0, 12);
+                            $tag = substr($raw, 12, 16);
+                            $ct = substr($raw, 28);
+                            $pt = openssl_decrypt($ct, 'aes-256-gcm', $appKey, OPENSSL_RAW_DATA, $iv, $tag);
+                            if ($pt !== false && $pt !== '') {
+                                $config[$ck] = $pt;
+                            }
+                        }
+                    }
+                }
+                $secDb->close();
+            } catch (\Throwable $e) {
+                // keep .env values on any failure
+            }
+        }
+    }
+}
+
+return $config;

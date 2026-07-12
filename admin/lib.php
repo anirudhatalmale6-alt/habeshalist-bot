@@ -170,3 +170,91 @@ function hl_csrf_check() {
 function h($s) {
     return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8');
 }
+
+// ---------------------------------------------------------------------------
+// 6) Encrypted secrets (bot token, Stripe key, ...).
+//    Secrets are stored ENCRYPTED at rest in the settings table (keys sec_*),
+//    using AES-256-GCM with a master key (HL_APP_KEY) that lives ONLY in the
+//    bot's .env file - never in the database and never in the repo. So a leak
+//    of the database alone reveals nothing; you also need the .env master key.
+//    config.php reads the same sec_* rows and decrypts them at bot runtime,
+//    always falling back to the plain .env value if anything is off.
+// ---------------------------------------------------------------------------
+
+// Load the 32-byte master key. Looks at a real env var first, then the bot's
+// .env (sibling of the database: <bot>/.env). Returns the raw key or null.
+function hl_app_key() {
+    static $key = false;
+    if ($key !== false) return $key;
+    $b64 = getenv('HL_APP_KEY') ?: ($_SERVER['HL_APP_KEY'] ?? '');
+    if ($b64 === '' && BOT_DB_PATH !== '') {
+        $envFile = dirname(BOT_DB_PATH, 2) . '/.env';   // <bot>/data/bot.sqlite -> <bot>/.env
+        if (is_readable($envFile)) {
+            foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+                $line = trim($line);
+                if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
+                list($k, $v) = explode('=', $line, 2);
+                if (trim($k) === 'HL_APP_KEY') {
+                    $v = trim($v);
+                    if (strlen($v) >= 2 && ($v[0] === '"' || $v[0] === "'") && substr($v, -1) === $v[0]) {
+                        $v = substr($v, 1, -1);
+                    }
+                    $b64 = $v; break;
+                }
+            }
+        }
+    }
+    $raw = $b64 !== '' ? base64_decode($b64, true) : false;
+    $key = ($raw !== false && strlen($raw) === 32) ? $raw : null;
+    return $key;
+}
+
+// Read a single KEY from the bot's .env (used to show the current fallback
+// value, masked). Returns '' if not found.
+function hl_bot_env($key) {
+    if (BOT_DB_PATH === '') return '';
+    $envFile = dirname(BOT_DB_PATH, 2) . '/.env';
+    if (!is_readable($envFile)) return '';
+    foreach (file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) as $line) {
+        $line = trim($line);
+        if ($line === '' || $line[0] === '#' || strpos($line, '=') === false) continue;
+        list($k, $v) = explode('=', $line, 2);
+        if (trim($k) === $key) {
+            $v = trim($v);
+            if (strlen($v) >= 2 && ($v[0] === '"' || $v[0] === "'") && substr($v, -1) === $v[0]) {
+                $v = substr($v, 1, -1);
+            }
+            return $v;
+        }
+    }
+    return '';
+}
+
+function hl_encrypt_secret($plain, $key) {
+    if (!function_exists('openssl_encrypt') || $key === null) return false;
+    $iv = random_bytes(12);
+    $tag = '';
+    $ct = openssl_encrypt($plain, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+    if ($ct === false) return false;
+    return 'v1:' . base64_encode($iv . $tag . $ct);
+}
+
+function hl_decrypt_secret($blob, $key) {
+    if ($key === null || strpos((string) $blob, 'v1:') !== 0) return false;
+    $raw = base64_decode(substr($blob, 3), true);
+    if ($raw === false || strlen($raw) < 28) return false;
+    $iv = substr($raw, 0, 12);
+    $tag = substr($raw, 12, 16);
+    $ct = substr($raw, 28);
+    $pt = openssl_decrypt($ct, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+    return $pt === false ? false : $pt;
+}
+
+// Show a secret as dots + last 4 chars, never the whole value.
+function hl_secret_masked($plain) {
+    $plain = (string) $plain;
+    $n = strlen($plain);
+    if ($n === 0) return '';
+    if ($n <= 4) return str_repeat("\xE2\x80\xA2", $n);
+    return str_repeat("\xE2\x80\xA2", 8) . substr($plain, -4);
+}
