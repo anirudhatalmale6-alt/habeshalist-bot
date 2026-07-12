@@ -10,11 +10,12 @@ hl_require_login();
 
 $mod = hl_process_moderation();       // approve/reject from the dashboard
 $flash = $mod[0] ?? null; $flashType = $mod[1] ?? 'ok';
+hl_ensure_scheduled_table();
 
 // ---- stats ----
 $stat_ads      = hl_count('SELECT COUNT(*) FROM ads');
-$stat_posted   = hl_count('SELECT COALESCE(SUM(posts_used),0) FROM promotions');
-$stat_sched    = hl_count("SELECT COUNT(*) FROM promotions WHERE status='approved'");
+$stat_posted   = hl_count("SELECT COUNT(*) FROM scheduled_posts WHERE status='posted'");
+$stat_sched    = hl_count("SELECT COUNT(*) FROM scheduled_posts WHERE status='scheduled'");
 $rev = hl_db()->query("SELECT COALESCE(SUM(price),0) FROM promotions WHERE status='approved'");
 $revenue = $rev ? (float) ($rev->fetchArray(SQLITE3_NUM)[0] ?? 0) : 0;
 $stat_biz      = hl_count("SELECT COUNT(DISTINCT business_name) FROM promotions WHERE status='approved' AND business_name IS NOT NULL AND business_name<>''");
@@ -41,6 +42,14 @@ $pays = [];
 $res = hl_db()->query("SELECT business_name, package_key, price, payment_method, payment_status, created_at
                        FROM promotions WHERE price IS NOT NULL AND price>0 ORDER BY id DESC LIMIT 6");
 while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $pays[] = $r; }
+
+// ---- upcoming scheduled posts (next 6) ----
+$slotOrder = "CASE slot WHEN 'morning' THEN 1 WHEN 'lunch' THEN 2 ELSE 3 END";
+$upcoming = [];
+$res = hl_db()->query("SELECT business_name, package_key, post_date, slot, pin FROM scheduled_posts
+                       WHERE status='scheduled' ORDER BY post_date ASC, $slotOrder ASC LIMIT 6");
+while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $upcoming[] = $r; }
+$slotNames = ['morning' => 'Morning', 'lunch' => 'Lunch', 'evening' => 'Evening'];
 
 hl_session_start();
 $csrf = h(hl_csrf_token());
@@ -118,6 +127,31 @@ if ($flash) hl_flash($flash, $flashType);
   </div>
 </div>
 
-<p class="muted small">Approvals here update the same database the bot reads and message the customer instantly in Telegram - the same as the in-bot approval. Scheduling, calendar slots and auto-posting to the group are the next milestone.</p>
+<div class="card">
+  <div class="hd">
+    <h2>Upcoming Scheduled Posts</h2>
+    <a class="btn ghost sm" href="scheduled.php">View all</a>
+  </div>
+  <?php if (!$upcoming): ?>
+    <div class="empty">Nothing scheduled yet. Approve a promotion and it gets booked into slots automatically.</div>
+  <?php else: ?>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Date</th><th>Slot</th><th>Business</th><th>Plan</th><th>Pinned</th></tr></thead>
+    <tbody>
+    <?php foreach ($upcoming as $s): ?>
+      <tr>
+        <td><?= h($s['post_date']) ?></td>
+        <td><?= h($slotNames[$s['slot']] ?? ucfirst($s['slot'])) ?> <span class="muted small"><?= h(hl_sched('sched_slot_' . $s['slot'])) ?></span></td>
+        <td><b><?= h($s['business_name'] ?: '-') ?></b></td>
+        <td><span class="plan"><?= h(hl_plan_name($s['package_key'])) ?></span></td>
+        <td><?= ((int) $s['pin'] === 1) ? '<span class="pill ok">Pinned</span>' : '<span class="muted small">-</span>' ?></td>
+      </tr>
+    <?php endforeach; ?>
+    </tbody>
+  </table></div>
+  <?php endif; ?>
+</div>
+
+<p class="muted small">Approvals here update the same database the bot reads and message the customer instantly in Telegram. Approved promotions are then booked into slots and auto-posted to your group by the scheduler.</p>
 
 <?php hl_shell_foot();

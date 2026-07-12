@@ -334,6 +334,33 @@ function hl_moderate_promo($promoId, $decision) {
 function hl_pending_count() {
     return hl_count("SELECT COUNT(*) FROM promotions WHERE status='pending_review'");
 }
+
+// ---- scheduling settings (mirror HL_Scheduler::DEFAULTS) ----
+const HL_SCHED = [
+    'sched_group_chat_id' => ['label' => 'Telegram group (chat id or @username)', 'default' => '-1003547700792'],
+    'sched_tz'            => ['label' => 'Timezone',        'default' => 'America/New_York'],
+    'sched_slot_morning'  => ['label' => 'Morning slot',    'default' => '08:30'],
+    'sched_slot_lunch'    => ['label' => 'Lunch slot',      'default' => '12:30'],
+    'sched_slot_evening'  => ['label' => 'Evening slot',    'default' => '19:30'],
+];
+function hl_sched($key) {
+    $def = HL_SCHED[$key]['default'] ?? '';
+    return hl_get_setting($key, $def);
+}
+// The panel reads scheduled_posts; create it if the cron has not run yet.
+function hl_ensure_scheduled_table() {
+    hl_db()->exec("CREATE TABLE IF NOT EXISTS scheduled_posts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, promotion_id INTEGER NOT NULL,
+        business_name TEXT, package_key TEXT, post_date TEXT NOT NULL, slot TEXT NOT NULL,
+        pin INTEGER DEFAULT 0, pin_hours INTEGER DEFAULT 0, status TEXT DEFAULT 'scheduled',
+        tg_message_id INTEGER, pin_until TEXT, posted_at TEXT, error TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+}
+function hl_slot_label($slot) {
+    $t = hl_sched('sched_slot_' . $slot);
+    $names = ['morning' => 'Morning', 'lunch' => 'Lunch', 'evening' => 'Evening'];
+    return ($names[$slot] ?? ucfirst($slot)) . ($t ? ' (' . $t . ')' : '');
+}
 function hl_plan_name($key) {
     return HL_PACKAGES[$key]['name'] ?? ($key !== '' ? $key : '-');
 }

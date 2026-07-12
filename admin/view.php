@@ -113,6 +113,8 @@ function hl_nav_items() {
         ['sec' => 'Main', 'items' => [
             ['slug' => 'dashboard',  'label' => 'Dashboard',       'href' => 'index.php',      'icon' => "\xF0\x9F\x93\x8A"],
             ['slug' => 'pending',    'label' => 'Pending Ads',     'href' => 'pending.php',    'icon' => "\xE2\x8F\xB3", 'badge' => true],
+            ['slug' => 'scheduled',  'label' => 'Scheduled Posts', 'href' => 'scheduled.php',  'icon' => "\xF0\x9F\x97\x93\xEF\xB8\x8F"],
+            ['slug' => 'calendar',   'label' => 'Calendar & Slots','href' => 'calendar.php',   'icon' => "\xF0\x9F\x93\x85"],
             ['slug' => 'payments',   'label' => 'Payments',        'href' => 'payments.php',   'icon' => "\xF0\x9F\x92\xB3"],
             ['slug' => 'businesses', 'label' => 'Businesses',      'href' => 'businesses.php', 'icon' => "\xF0\x9F\x8F\xA2"],
             ['slug' => 'users',      'label' => 'Users',           'href' => 'users.php',      'icon' => "\xF0\x9F\x91\xA5"],
@@ -120,11 +122,10 @@ function hl_nav_items() {
         ['sec' => 'Settings', 'items' => [
             ['slug' => 'pricing',    'label' => 'Plan & Pricing',  'href' => 'pricing.php',    'icon' => "\xF0\x9F\x8F\xB7\xEF\xB8\x8F"],
             ['slug' => 'methods',    'label' => 'Payment Methods', 'href' => 'methods.php',    'icon' => "\xF0\x9F\x92\xB0"],
+            ['slug' => 'schedule',   'label' => 'Schedule Settings','href' => 'settings.php',  'icon' => "\xE2\x9A\x99\xEF\xB8\x8F"],
             ['slug' => 'keys',       'label' => 'Keys',            'href' => 'secrets.php',    'icon' => "\xF0\x9F\x94\x91"],
         ]],
         ['sec' => 'Coming soon', 'items' => [
-            ['slug' => 'scheduled', 'label' => 'Scheduled Posts',  'href' => 'soon.php',       'icon' => "\xF0\x9F\x97\x93\xEF\xB8\x8F", 'soon' => true],
-            ['slug' => 'calendar',  'label' => 'Calendar & Slots', 'href' => 'soon.php',       'icon' => "\xF0\x9F\x93\x85", 'soon' => true],
             ['slug' => 'subs',      'label' => 'Subscriptions',    'href' => 'soon.php',       'icon' => "\xF0\x9F\x94\x84", 'soon' => true],
             ['slug' => 'reports',   'label' => 'Reports',          'href' => 'soon.php',       'icon' => "\xF0\x9F\x93\x88", 'soon' => true],
         ]],
