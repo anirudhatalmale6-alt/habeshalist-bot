@@ -20,6 +20,26 @@
  */
 
 // ---------------------------------------------------------------------------
+// 0) Force HTTPS + set baseline security headers for every browser request.
+//    (Skipped on CLI so reset-password.php still runs from the terminal.)
+//    Never let the login form or session cookie travel over cleartext http.
+// ---------------------------------------------------------------------------
+if (PHP_SAPI !== 'cli') {
+    $hl_https = (!empty($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) !== 'off')
+        || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https')
+        || ((int) ($_SERVER['SERVER_PORT'] ?? 0) === 443);
+    if (!$hl_https && !empty($_SERVER['HTTP_HOST'])) {
+        header('Location: https://' . $_SERVER['HTTP_HOST'] . ($_SERVER['REQUEST_URI'] ?? '/'), true, 301);
+        exit;
+    }
+    // Folder-scoped hardening headers (sent only on panel responses; no HSTS so
+    // the rest of habeshalist.com is untouched).
+    header('X-Frame-Options: DENY');            // no embedding in an iframe (clickjacking)
+    header('X-Content-Type-Options: nosniff');  // no MIME sniffing
+    header('Referrer-Policy: no-referrer');     // do not leak the panel URL
+}
+
+// ---------------------------------------------------------------------------
 // 1) Locate the bot's SQLite database (shared with the Telegram bot).
 // ---------------------------------------------------------------------------
 // If auto-detection ever fails, hard-set the absolute path here, e.g.
