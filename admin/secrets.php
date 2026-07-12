@@ -115,7 +115,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-hl_head('Keys', true);
+hl_shell_head('Keys', 'keys', hl_pending_count());
 if ($flash) hl_flash($flash, $flashType);
 $csrf = h(hl_csrf_token());
 
@@ -129,7 +129,7 @@ if ($appKey === null):
   <p class="muted small">The master key lives only in .env, never in the database - that is what keeps the stored keys safe even if the database were ever copied. Once the line is added, reload this page.</p>
 </div>
 <?php
-    hl_foot();
+    hl_shell_foot();
     exit;
 endif;
 ?>
@@ -191,4 +191,4 @@ endif;
     padding:8px 10px;border-radius:6px;display:inline-block;font-size:13px;word-break:break-all}
 </style>
 
-<?php hl_foot();
+<?php hl_shell_foot();

@@ -1,153 +1,123 @@
 <?php
 /**
- * index.php - the admin dashboard.
- *  - Edit package prices (writes settings key price_<pkg>) - live for the bot.
- *  - Edit payment handles (pay_zelle / pay_cashapp / pay_support) - live.
- *  - At-a-glance stats + recent promotions (read-only in this milestone).
+ * index.php - dashboard. Live stat cards, a Pending Ads queue with
+ * approve/reject (customer notified in Telegram), and recent payments.
+ * Prices / payment handles / keys now live on their own pages (see sidebar).
  */
 require __DIR__ . '/lib.php';
 require __DIR__ . '/view.php';
 hl_require_login();
 
-$flash = null; $flashType = 'ok';
+$mod = hl_process_moderation();       // approve/reject from the dashboard
+$flash = $mod[0] ?? null; $flashType = $mod[1] ?? 'ok';
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    hl_csrf_check();
-    $action = $_POST['action'] ?? '';
-
-    if ($action === 'prices') {
-        $saved = 0;
-        foreach (HL_PACKAGES as $key => $meta) {
-            if (!isset($_POST['price_' . $key])) continue;
-            $raw = trim($_POST['price_' . $key]);
-            if ($raw === '' || !is_numeric($raw) || $raw < 0) continue;
-            // Store as an integer if whole, else keep decimals - the bot casts as needed.
-            $val = ($raw == (int)$raw) ? (string)(int)$raw : (string)(0 + $raw);
-            hl_set_setting('price_' . $key, $val);
-            $saved++;
-        }
-        $flash = "Saved $saved package price(s). The bot will use the new prices on the next message.";
-    } elseif ($action === 'handles') {
-        foreach (HL_PAY_HANDLES as $key => $meta) {
-            if (!isset($_POST[$key])) continue;
-            hl_set_setting($key, trim($_POST[$key]));
-        }
-        $flash = 'Payment handles saved. These now show in the bot payment screen instantly.';
-    }
-}
-
-// ---- gather current values + stats ----
-$prices = [];
-foreach (HL_PACKAGES as $key => $meta) {
-    $prices[$key] = hl_get_setting('price_' . $key, (string)$meta['default']);
-}
-$handles = [];
-foreach (HL_PAY_HANDLES as $key => $meta) {
-    $handles[$key] = hl_get_setting($key, $key === 'pay_support' ? '@Habesha_list' : '');
-}
-
-$stat_users = hl_count('SELECT COUNT(*) FROM users');
-$stat_ads   = hl_count('SELECT COUNT(*) FROM ads');
-$stat_promos = hl_count('SELECT COUNT(*) FROM promotions');
-$stat_pending = hl_count("SELECT COUNT(*) FROM promotions WHERE status='pending'");
-$stat_approved = hl_count("SELECT COUNT(*) FROM promotions WHERE status='approved'");
+// ---- stats ----
+$stat_ads      = hl_count('SELECT COUNT(*) FROM ads');
+$stat_posted   = hl_count('SELECT COALESCE(SUM(posts_used),0) FROM promotions');
+$stat_sched    = hl_count("SELECT COUNT(*) FROM promotions WHERE status='approved'");
 $rev = hl_db()->query("SELECT COALESCE(SUM(price),0) FROM promotions WHERE status='approved'");
 $revenue = $rev ? (float) ($rev->fetchArray(SQLITE3_NUM)[0] ?? 0) : 0;
+$stat_biz      = hl_count("SELECT COUNT(DISTINCT business_name) FROM promotions WHERE status='approved' AND business_name IS NOT NULL AND business_name<>''");
+$stat_members  = hl_count('SELECT COUNT(*) FROM users');
+$pending_count = hl_count("SELECT COUNT(*) FROM promotions WHERE status='pending_review'");
 
-// recent promotions
-$recent = [];
-$res = hl_db()->query("SELECT business_name, package_key, price, payment_method, payment_status, status, created_at
-                       FROM promotions ORDER BY id DESC LIMIT 15");
-while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $recent[] = $r; }
+$cards = [
+    ['n' => number_format($stat_ads),      'l' => 'Total Ads',         'ico' => "\xF0\x9F\x93\xA2", 'c' => '46,120,229'],
+    ['n' => number_format($stat_posted),   'l' => 'Posted in Group',   'ico' => "\xE2\x9C\x85",     'c' => '46,160,67'],
+    ['n' => number_format($stat_sched),    'l' => 'Scheduled',         'ico' => "\xE2\x8F\xB0",     'c' => '210,153,34'],
+    ['n' => hl_money($revenue),            'l' => 'Revenue',           'ico' => "\xF0\x9F\x92\xB0", 'c' => '139,92,246'],
+    ['n' => number_format($stat_biz),      'l' => 'Active Businesses', 'ico' => "\xF0\x9F\x8F\xA2", 'c' => '20,158,158'],
+    ['n' => number_format($stat_members),  'l' => 'Total Members',     'ico' => "\xF0\x9F\x91\xA5", 'c' => '99,102,241'],
+];
 
-function pillClass($status) {
-    switch ($status) {
-        case 'approved': case 'verified': return 'ok';
-        case 'pending': case 'awaiting_verification': return 'pend';
-        case 'rejected': return 'rej';
-        default: return 'mut';
-    }
-}
+// ---- pending queue (recent 6) ----
+$pending = [];
+$res = hl_db()->query("SELECT id, business_name, package_key, price, payment_method, created_at
+                       FROM promotions WHERE status='pending_review' ORDER BY id DESC LIMIT 6");
+while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $pending[] = $r; }
 
-hl_head('Dashboard', true);
-if ($flash) hl_flash($flash, $flashType);
+// ---- recent payments (recent 6 priced promotions) ----
+$pays = [];
+$res = hl_db()->query("SELECT business_name, package_key, price, payment_method, payment_status, created_at
+                       FROM promotions WHERE price IS NOT NULL AND price>0 ORDER BY id DESC LIMIT 6");
+while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $pays[] = $r; }
+
+hl_session_start();
 $csrf = h(hl_csrf_token());
+hl_shell_head('Dashboard', 'dashboard', $pending_count);
+if ($flash) hl_flash($flash, $flashType);
 ?>
 
 <div class="stats">
-  <div class="stat"><div class="n"><?= $stat_users ?></div><div class="l">Registered users</div></div>
-  <div class="stat"><div class="n"><?= $stat_ads ?></div><div class="l">Classified ads</div></div>
-  <div class="stat"><div class="n"><?= $stat_promos ?></div><div class="l">Promotions</div></div>
-  <div class="stat"><div class="n"><?= $stat_pending ?></div><div class="l">Pending review</div></div>
-  <div class="stat"><div class="n">$<?= number_format($revenue, 0) ?></div><div class="l">Approved revenue</div></div>
-</div>
-
-<div class="card">
-  <h2>Package prices</h2>
-  <p class="sub">Change a price here and the bot uses it immediately - no restart. These map to the same settings the in-bot /promoadmin command edits.</p>
-  <form method="post">
-    <input type="hidden" name="csrf" value="<?= $csrf ?>">
-    <input type="hidden" name="action" value="prices">
-    <?php foreach (HL_PACKAGES as $key => $meta): ?>
-      <div class="row">
-        <div class="field">
-          <label><?= h($meta['name']) ?> <span class="muted small">&mdash; <?= h($meta['note']) ?></span></label>
-          <div class="prefix"><span class="sym">$</span>
-            <input type="number" name="price_<?= h($key) ?>" min="0" step="0.01" value="<?= h($prices[$key]) ?>">
-          </div>
-        </div>
-      </div>
-    <?php endforeach; ?>
-    <button type="submit">Save prices</button>
-  </form>
-</div>
-
-<div class="card">
-  <h2>Payment handles</h2>
-  <p class="sub">Shown to users on the manual payment screen ("Please send payment to: ..."). Leave a handle blank to hide that method's details and fall back to "contact support".</p>
-  <form method="post">
-    <input type="hidden" name="csrf" value="<?= $csrf ?>">
-    <input type="hidden" name="action" value="handles">
-    <?php foreach (HL_PAY_HANDLES as $key => $meta): ?>
-      <div class="row">
-        <div class="field">
-          <label><?= h($meta['label']) ?></label>
-          <input type="text" name="<?= h($key) ?>" value="<?= h($handles[$key]) ?>" placeholder="<?= h($meta['placeholder']) ?>">
-        </div>
-      </div>
-    <?php endforeach; ?>
-    <button type="submit">Save handles</button>
-  </form>
-</div>
-
-<div class="card">
-  <h2>Recent promotions</h2>
-  <p class="sub">The latest business promotions submitted through the bot. Approving/rejecting from the web is the next step - for now these are managed from Telegram.</p>
-  <?php if (!$recent): ?>
-    <p class="muted">No promotions yet.</p>
-  <?php else: ?>
-  <div class="tblwrap">
-  <table>
-    <thead><tr><th>Business</th><th>Package</th><th>Price</th><th>Method</th><th>Payment</th><th>Status</th><th>Date</th></tr></thead>
-    <tbody>
-    <?php foreach ($recent as $r):
-        $pkg = HL_PACKAGES[$r['package_key']]['name'] ?? ($r['package_key'] ?: '-'); ?>
-      <tr>
-        <td><?= h($r['business_name'] ?: '(draft)') ?></td>
-        <td><?= h($pkg) ?></td>
-        <td>$<?= h(rtrim(rtrim(number_format((float)$r['price'], 2), '0'), '.')) ?></td>
-        <td><?= h($r['payment_method'] ?: '-') ?></td>
-        <td><span class="pill <?= pillClass($r['payment_status']) ?>"><?= h($r['payment_status'] ?: '-') ?></span></td>
-        <td><span class="pill <?= pillClass($r['status']) ?>"><?= h($r['status'] ?: '-') ?></span></td>
-        <td class="muted small"><?= h($r['created_at']) ?></td>
-      </tr>
-    <?php endforeach; ?>
-    </tbody>
-  </table>
+  <?php foreach ($cards as $c): ?>
+  <div class="stat">
+    <div class="ico" style="background:rgba(<?= $c['c'] ?>,.14);color:rgb(<?= $c['c'] ?>)"><?= $c['ico'] ?></div>
+    <div><div class="n"><?= h($c['n']) ?></div><div class="l"><?= h($c['l']) ?></div></div>
   </div>
-  <?php endif; ?>
+  <?php endforeach; ?>
 </div>
 
-<p class="muted small">Signed in as <?= h($_SESSION['hl_admin']) ?>. Changes here write to the same database the Telegram bot reads, so they take effect immediately.</p>
+<div class="grid2">
+  <div class="card">
+    <div class="hd">
+      <h2>Pending Ads<?= $pending_count > 0 ? ' (' . $pending_count . ')' : '' ?></h2>
+      <a class="btn ghost sm" href="pending.php">View all</a>
+    </div>
+    <?php if (!$pending): ?>
+      <div class="empty">Nothing waiting for review right now.</div>
+    <?php else: ?>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Business</th><th>Plan</th><th>Submitted</th><th></th></tr></thead>
+      <tbody>
+      <?php foreach ($pending as $p): ?>
+        <tr>
+          <td><b><?= h($p['business_name'] ?: '(no name)') ?></b></td>
+          <td><span class="plan"><?= h(hl_plan_name($p['package_key'])) ?> &middot; <?= h(hl_money($p['price'])) ?></span></td>
+          <td class="muted small"><?= h($p['created_at']) ?></td>
+          <td>
+            <div class="actions">
+              <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
+                <input type="hidden" name="action" value="approve"><input type="hidden" name="promo_id" value="<?= (int) $p['id'] ?>">
+                <button class="btn sm" type="submit">Approve</button></form>
+              <form method="post" onsubmit="return confirm('Reject this promotion? The customer will be told in Telegram.')">
+                <input type="hidden" name="csrf" value="<?= $csrf ?>">
+                <input type="hidden" name="action" value="reject"><input type="hidden" name="promo_id" value="<?= (int) $p['id'] ?>">
+                <button class="btn sm red" type="submit">Reject</button></form>
+            </div>
+          </td>
+        </tr>
+      <?php endforeach; ?>
+      </tbody>
+    </table></div>
+    <?php endif; ?>
+  </div>
 
-<?php hl_foot();
+  <div class="card">
+    <div class="hd">
+      <h2>Recent Payments</h2>
+      <a class="btn ghost sm" href="payments.php">View all</a>
+    </div>
+    <?php if (!$pays): ?>
+      <div class="empty">No payments yet.</div>
+    <?php else: ?>
+    <div class="tblwrap"><table>
+      <thead><tr><th>Business</th><th>Plan</th><th>Amount</th><th>Method</th><th>Status</th></tr></thead>
+      <tbody>
+      <?php foreach ($pays as $p): list($pc, $pl) = hl_status_meta($p['payment_status']); ?>
+        <tr>
+          <td><?= h($p['business_name'] ?: '-') ?></td>
+          <td><span class="plan"><?= h(hl_plan_name($p['package_key'])) ?></span></td>
+          <td><b><?= h(hl_money($p['price'])) ?></b></td>
+          <td class="muted"><?= h($p['payment_method'] ? ucfirst($p['payment_method']) : '-') ?></td>
+          <td><span class="pill <?= $pc ?>"><?= h($pl) ?></span></td>
+        </tr>
+      <?php endforeach; ?>
+      </tbody>
+    </table></div>
+    <?php endif; ?>
+  </div>
+</div>
+
+<p class="muted small">Approvals here update the same database the bot reads and message the customer instantly in Telegram - the same as the in-bot approval. Scheduling, calendar slots and auto-posting to the group are the next milestone.</p>
+
+<?php hl_shell_foot();

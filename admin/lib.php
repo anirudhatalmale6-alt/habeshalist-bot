@@ -250,6 +250,128 @@ function hl_decrypt_secret($blob, $key) {
     return $pt === false ? false : $pt;
 }
 
+// The live value of a secret: the encrypted DB override if present, else .env.
+function hl_effective_secret($envKey, $setKey) {
+    $key = hl_app_key();
+    if ($key !== null) {
+        $blob = hl_get_setting($setKey, '');
+        if ($blob !== '') {
+            $dec = hl_decrypt_secret($blob, $key);
+            if ($dec !== false && $dec !== '') return $dec;
+        }
+    }
+    return hl_bot_env($envKey);
+}
+
+// ---------------------------------------------------------------------------
+// 7) Telegram send (used to notify a customer when a promo is approved/rejected
+//    from the web). Uses the live bot token, curl with a stream fallback.
+// ---------------------------------------------------------------------------
+function hl_tg_api($token, $method, array $params) {
+    $url = 'https://api.telegram.org/bot' . $token . '/' . $method;
+    $body = http_build_query($params);
+    $resp = false;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 12,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $body,
+        ]);
+        $resp = curl_exec($ch);
+        curl_close($ch);
+    }
+    if ($resp === false) {
+        $ctx = stream_context_create(['http' => [
+            'method' => 'POST',
+            'header' => 'Content-Type: application/x-www-form-urlencoded',
+            'content' => $body, 'timeout' => 12, 'ignore_errors' => true,
+        ]]);
+        $resp = @file_get_contents($url, false, $ctx);
+    }
+    $j = $resp !== false ? json_decode($resp, true) : null;
+    return is_array($j) ? $j : ['ok' => false, 'description' => 'Could not reach Telegram.'];
+}
+
+// Approve or reject a promotion from the web, mirroring the in-bot flow, and
+// notify the customer in Telegram. Returns [okBool, humanMessage].
+function hl_moderate_promo($promoId, $decision) {
+    $db = hl_db();
+    $stmt = $db->prepare('SELECT * FROM promotions WHERE id = :id');
+    $stmt->bindValue(':id', (int) $promoId, SQLITE3_INTEGER);
+    $promo = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+    if (!$promo) return [false, 'That promotion could not be found.'];
+    if (($promo['status'] ?? '') !== 'pending_review') {
+        return [false, 'This one was already handled (status: ' . ($promo['status'] ?: 'unknown') . ').'];
+    }
+    $bname = $promo['business_name'] !== '' ? $promo['business_name'] : 'your business';
+    $tid = (int) $promo['telegram_id'];
+
+    if ($decision === 'approve') {
+        $db->exec("UPDATE promotions SET status='approved', payment_status='verified' WHERE id=" . (int) $promoId);
+        $text = "\xF0\x9F\x8E\x89 <b>Great news!</b> Your promotion for <b>" . $bname . "</b> has been approved.\n\n"
+              . "It will be posted in the HabeshaList Telegram Group as scheduled. You'll be notified once it goes live. Thank you!";
+        $verb = 'Approved';
+    } else {
+        $db->exec("UPDATE promotions SET status='rejected' WHERE id=" . (int) $promoId);
+        $text = "Regarding your promotion for <b>" . $bname . "</b> - unfortunately it wasn't approved this time. "
+              . "Please contact our support team if you have any questions about your payment or would like to resubmit.";
+        $verb = 'Rejected';
+    }
+
+    $token = hl_effective_secret('TELEGRAM_BOT_TOKEN', 'sec_bot_token');
+    if ($token === '') {
+        return [true, $verb . ': ' . $bname . ' (saved, but the bot token is not available here so the customer was not messaged).'];
+    }
+    $r = hl_tg_api($token, 'sendMessage', ['chat_id' => $tid, 'text' => $text, 'parse_mode' => 'HTML']);
+    if (!empty($r['ok'])) {
+        return [true, $verb . ': ' . $bname . ' - the customer was notified in Telegram.'];
+    }
+    return [true, $verb . ': ' . $bname . ' (saved, but the Telegram notice failed: ' . ($r['description'] ?? 'unknown') . ').'];
+}
+
+function hl_pending_count() {
+    return hl_count("SELECT COUNT(*) FROM promotions WHERE status='pending_review'");
+}
+function hl_plan_name($key) {
+    return HL_PACKAGES[$key]['name'] ?? ($key !== '' ? $key : '-');
+}
+function hl_money($n) {
+    $s = number_format((float) $n, 2);
+    $s = rtrim(rtrim($s, '0'), '.');
+    return '$' . $s;
+}
+// Returns [pillClass, label] for a promotion status / payment_status.
+function hl_status_meta($status) {
+    switch ($status) {
+        case 'approved': case 'verified': case 'posted': case 'paid':
+            return ['ok', ucfirst($status)];
+        case 'pending_review':
+            return ['pend', 'Pending review'];
+        case 'pending': case 'awaiting_verification': case 'unpaid':
+            return ['pend', 'Pending'];
+        case 'rejected':
+            return ['rej', 'Rejected'];
+        case 'draft':
+            return ['mut', 'Draft'];
+        default:
+            return ['mut', $status !== '' && $status !== null ? ucfirst(str_replace('_', ' ', $status)) : '-'];
+    }
+}
+
+// Handle an approve/reject POST on a page (dashboard or pending). Returns
+// [message, type] to flash, or null if this request was not a moderation POST.
+function hl_process_moderation() {
+    if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') return null;
+    $act = $_POST['action'] ?? '';
+    if ($act !== 'approve' && $act !== 'reject') return null;
+    hl_csrf_check();
+    $id = (int) ($_POST['promo_id'] ?? 0);
+    list($ok, $msg) = hl_moderate_promo($id, $act);
+    return [$msg, $ok ? 'ok' : 'err'];
+}
+
 // Show a secret as dots + last 4 chars, never the whole value.
 function hl_secret_masked($plain) {
     $plain = (string) $plain;
