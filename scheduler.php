@@ -6,16 +6,25 @@
  * minutes and the command to:
  *   php /home/USER/public_html/website_eff65c78/bot/scheduler.php >> /home/USER/public_html/website_eff65c78/bot/data/scheduler.log 2>&1
  *
- * CLI-only: it refuses to run from a browser so nobody can trigger posting over
- * the web. (If your host only offers URL-based cron, tell me and I'll add a
- * secret-token gate instead.)
+ * It refuses to run from a real browser request so nobody can trigger posting
+ * over the web. It DOES run when launched from the shell/cron - whether that is
+ * the CLI php binary (php_sapi_name()==='cli') or a CGI php binary invoked from
+ * cron (no web request context) - and also via an authenticated URL that carries
+ * the API secret (?key=... or an X-Sched-Key header), for hosts whose cron can
+ * only fetch a URL.
  */
-if (php_sapi_name() !== 'cli') {
+$config = require __DIR__ . '/config/config.php';
+
+$fromShell = (php_sapi_name() === 'cli') || empty($_SERVER['REQUEST_METHOD']);
+$provided  = isset($_GET['key']) ? (string) $_GET['key']
+           : (string) ($_SERVER['HTTP_X_SCHED_KEY'] ?? '');
+$secret    = (string) ($config['api_secret'] ?? '');
+$keyOk     = ($secret !== '' && hash_equals($secret, $provided));
+if (!$fromShell && !$keyOk) {
     http_response_code(403);
     exit('This script runs from cron (command line) only.');
 }
 
-$config = require __DIR__ . '/config/config.php';
 require_once __DIR__ . '/includes/telegram.php';
 require_once __DIR__ . '/includes/scheduler.php';
 
