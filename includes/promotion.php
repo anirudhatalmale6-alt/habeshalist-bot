@@ -450,6 +450,27 @@ function promoHandleStateInput($userId, $msg, $state) {
         return;
     }
 
+    // ---- Scheduling: user typed a custom time ----
+    if ($st === 'promo_sched_time_text') {
+        $hm = promoParseTypedTime($text);
+        if ($hm === null) {
+            $tg->sendMessage($userId, "Sorry, I couldn't read that time. Please type it like 9:00 AM, 2:30 PM, or 14:30:");
+            return;
+        }
+        $ctx = $data['_sched_ctx'] ?? 'single';
+        if ($ctx === 'single') {
+            promoFinalizeSingle($userId, $data, $hm);
+        } elseif (strpos($ctx, 'rec') === 0) {
+            $n = (int) substr($ctx, 3);
+            if (!isset($data['_sched_slots'])) $data['_sched_slots'] = [];
+            $data['_sched_slots'][$n]['time'] = $hm;
+            $db->setState($userId, 'promo_sched_rec', $data);
+            if ($n === 1) { promoWeekdayGrid($userId, 2, $data); }
+            else { promoFinalizeRecurring($userId, $data); }
+        }
+        return;
+    }
+
     $isEdit = promoIsEdit($state);
     $field = $isEdit ? substr($st, strlen('promo_edit_')) : substr($st, strlen('promo_'));
 
@@ -683,10 +704,10 @@ function promoShowReview($userId, $data) {
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\x93\x8B <b>Review Your Promotion</b>\n\n" .
         promoSummaryText($data, false) . "\n\n" .
-        "Everything look good?",
+        "Everything look good? Tap Preview to see exactly how your ad will appear in the group, then pick your date & time.",
         [
             [
-                ['text' => "\xE2\x9C\x85 Submit for Review", 'callback_data' => 'promo_submit'],
+                ['text' => "\xF0\x9F\x91\x81 Preview Ad", 'callback_data' => 'promo_preview'],
                 ['text' => "\xE2\x9C\x8F\xEF\xB8\x8F Edit", 'callback_data' => 'promo_edit'],
             ],
             [['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel']],
@@ -759,8 +780,12 @@ function promoSubmit($userId, $state) {
         ($receipt ? "Receipt: <b>{$receipt}</b>\n" : '') .
         "Status: <b>Pending Review</b>\n\n" .
         "Our team will verify your payment and review your ad (usually within 24 hours). " .
-        "You'll be notified here as soon as it's approved and scheduled to post in the group.",
-        [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]
+        "Your posts are already scheduled for:\n" . promoScheduleSummary($data['schedule'] ?? []) . "\n\n" .
+        "You'll be notified here as soon as it's approved and the first post goes live.",
+        [
+            [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
+            [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
+        ]
     );
 
     promoNotifyAdmins($promoId, $data, $user);
@@ -943,4 +968,573 @@ function promoAdminEdit($userId, $settingKey) {
             [[['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'main_menu']]]
         );
     }
+}
+
+// ============================================================
+// PREVIEW + SCHEDULING  (Phase 2 - M scheduling picker)
+// After the review the user (1) previews the exact group post, then
+// (2) picks when it runs: one date+time for a one-time / Business of the
+// Week post, or two recurring weekday+time slots for monthly / yearly.
+// ============================================================
+
+function promoSchedTz() {
+    global $db;
+    $tz = $db->getSetting('sched_tz', 'America/New_York');
+    try { return new DateTimeZone($tz); }
+    catch (\Throwable $e) { return new DateTimeZone('America/New_York'); }
+}
+
+// "08:30" -> "8:30 AM"
+function promoTimeLabel($hm) {
+    $p = DateTime::createFromFormat('H:i', $hm);
+    return $p ? $p->format('g:i A') : $hm;
+}
+
+// The 3 admin-configured slot times, used as one-tap "popular" suggestions.
+function promoPopularTimes() {
+    global $db;
+    return [
+        $db->getSetting('sched_slot_morning', '08:30'),
+        $db->getSetting('sched_slot_lunch', '12:30'),
+        $db->getSetting('sched_slot_evening', '19:30'),
+    ];
+}
+
+// ---- Preview: render the post exactly as the scheduler will send it ----
+
+function promoShowPreview($userId, $data) {
+    global $tg, $db;
+    $db->setState($userId, 'promo_preview', $data);
+
+    $text = HL_Scheduler::renderPostText($data);
+    $logo = $data['logo'] ?? '';
+    $images = $data['images'] ?? [];
+
+    // Header note so it's clear this block is the live preview.
+    $tg->sendMessage($userId,
+        "\xF0\x9F\x91\x81 <b>Preview</b> - this is exactly how your ad will look in the group:");
+
+    if ($logo !== '') {
+        $tg->sendPhoto($userId, $logo, $text);
+    } elseif (!empty($images)) {
+        $tg->sendMediaGroup($userId, $images);
+        $tg->sendMessage($userId, $text);
+    } else {
+        $tg->sendMessage($userId, $text);
+    }
+
+    $tg->sendInlineButtons($userId,
+        "Looks good? Next, choose when it should be posted.",
+        [
+            [['text' => "\xF0\x9F\x93\x85 Choose Date & Time", 'callback_data' => 'promo_sched_start']],
+            [
+                ['text' => "\xE2\x9C\x8F\xEF\xB8\x8F Edit Ad", 'callback_data' => 'promo_edit'],
+                ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Review", 'callback_data' => 'promo_back_review'],
+            ],
+        ]
+    );
+}
+
+// ---- Entry to the scheduling picker (branches by package) ----
+
+function promoSchedStart($userId, $state) {
+    global $db;
+    $data = $state['data'];
+    $key = $data['package_key'] ?? 'one_time';
+
+    // clear any half-finished picks
+    unset($data['_sched_date'], $data['_sched_slots'], $data['_sched_ctx']);
+    $db->setState($userId, 'promo_sched_date', $data);
+
+    if ($key === 'monthly' || $key === 'yearly') {
+        $data['_sched_slots'] = [];
+        $db->setState($userId, 'promo_sched_rec', $data);
+        promoWeekdayGrid($userId, 1, $data);
+    } else {
+        promoDateGrid($userId, $data);
+    }
+}
+
+// ---- Single date grid (one-time & Business of the Week) ----
+
+function promoDateGrid($userId, $data) {
+    global $tg;
+    $key = $data['package_key'] ?? 'one_time';
+    $tz = promoSchedTz();
+    $today = new DateTime('now', $tz);
+    $today->setTime(0, 0);
+
+    $days = ($key === 'botw') ? 28 : 30;   // botw is bookable up to 4 weeks out
+    $rows = [];
+    $row = [];
+    for ($i = 0; $i < $days; $i++) {
+        $d = (clone $today)->modify("+{$i} day");
+        $label = $d->format('D M j');
+        $row[] = ['text' => $label, 'callback_data' => 'pschd_' . $d->format('Ymd')];
+        if (count($row) === 2) { $rows[] = $row; $row = []; }
+    }
+    if (!empty($row)) $rows[] = $row;
+    $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'promo_preview']];
+
+    $note = ($key === 'botw')
+        ? "Pick the day your Business of the Week feature should start. It stays pinned for the full 7 days."
+        : "Pick the date you'd like your post to go out:";
+    $tg->sendInlineButtons($userId, "\xF0\x9F\x93\x85 <b>Choose a date</b>\n\n" . $note, $rows);
+}
+
+function promoSchedPickDate($userId, $ymd, $state) {
+    global $db;
+    $data = $state['data'];
+    $d = DateTime::createFromFormat('Ymd', $ymd, promoSchedTz());
+    if (!$d) { promoDateGrid($userId, $data); return; }
+    $data['_sched_date'] = $d->format('Y-m-d');
+    $data['_sched_ctx'] = 'single';
+    $db->setState($userId, 'promo_sched_time', $data);
+    promoTimeGrid($userId, 'pscht_', "\xF0\x9F\x95\x92 <b>Choose a time</b> for <b>" . $d->format('D, M j') . "</b>:", 'promo_sched_start');
+}
+
+// ---- Time grid (shared by single & recurring; prefix picks the callback) ----
+
+function promoTimeGrid($userId, $cbPrefix, $header, $backCb) {
+    global $tg;
+
+    // Popular one-tap suggestions (the 3 configured slots)
+    $popular = [];
+    foreach (promoPopularTimes() as $hm) {
+        $popular[] = ['text' => "\xE2\xAD\x90 " . promoTimeLabel($hm), 'callback_data' => $cbPrefix . str_replace(':', '', $hm)];
+    }
+    $rows = [$popular];
+
+    // Hourly grid 8 AM - 9 PM
+    $row = [];
+    for ($h = 8; $h <= 21; $h++) {
+        $hm = sprintf('%02d:00', $h);
+        $row[] = ['text' => promoTimeLabel($hm), 'callback_data' => $cbPrefix . str_replace(':', '', $hm)];
+        if (count($row) === 3) { $rows[] = $row; $row = []; }
+    }
+    if (!empty($row)) $rows[] = $row;
+
+    $rows[] = [['text' => "\xE2\x8C\xA8\xEF\xB8\x8F Type another time", 'callback_data' => $cbPrefix . 'custom']];
+    $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => $backCb]];
+
+    $tg->sendInlineButtons($userId, $header . "\n\n(\xE2\xAD\x90 = popular times)", $rows);
+}
+
+function promoSchedPickTimeSingle($userId, $hhmm, $state) {
+    global $db, $tg;
+    $data = $state['data'];
+
+    if ($hhmm === 'custom') {
+        $data['_sched_ctx'] = 'single';
+        $db->setState($userId, 'promo_sched_time_text', $data);
+        $tg->sendInlineButtons($userId,
+            "\xE2\x8C\xA8\xEF\xB8\x8F Type the time you want (e.g. <b>9:00 AM</b>, <b>2:30 PM</b>, or <b>14:30</b>):",
+            [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'pschd_' . str_replace('-', '', $data['_sched_date'] ?? '')]]]
+        );
+        return;
+    }
+
+    $hm = promoNormPickTime($hhmm);
+    if ($hm === null) { promoTimeGrid($userId, 'pscht_', "Please pick a valid time:", 'promo_sched_start'); return; }
+    promoFinalizeSingle($userId, $data, $hm);
+}
+
+function promoFinalizeSingle($userId, $data, $hm) {
+    $date = $data['_sched_date'] ?? '';
+    $data['schedule'] = ['mode' => 'single', 'date' => $date, 'time' => $hm];
+    $data['start_date'] = $date;
+    $data['end_date'] = $date;
+    unset($data['_sched_date'], $data['_sched_ctx']);
+    promoSchedConfirm($userId, $data);
+}
+
+// ---- Recurring: two weekday + time slots (monthly & yearly) ----
+
+function promoWeekdayNames() {
+    return [1 => 'Monday', 2 => 'Tuesday', 3 => 'Wednesday', 4 => 'Thursday', 5 => 'Friday', 6 => 'Saturday', 7 => 'Sunday'];
+}
+
+function promoWeekdayGrid($userId, $slotNum, $data) {
+    global $tg;
+    $names = promoWeekdayNames();
+    $rows = [];
+    $row = [];
+    foreach ($names as $dow => $name) {
+        $row[] = ['text' => $name, 'callback_data' => "pschw_{$slotNum}_{$dow}"];
+        if (count($row) === 2) { $rows[] = $row; $row = []; }
+    }
+    if (!empty($row)) $rows[] = $row;
+    $backCb = ($slotNum === 1) ? 'promo_preview' : 'promo_sched_start';
+    $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => $backCb]];
+
+    $ord = ($slotNum === 1) ? 'first' : 'second';
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x93\x86 <b>Weekly posting day " . $slotNum . " of 2</b>\n\n" .
+        "Pick the <b>{$ord}</b> day of the week you'd like to post on:",
+        $rows
+    );
+}
+
+function promoSchedPickWeekday($userId, $slotNum, $dow, $state) {
+    global $db;
+    $data = $state['data'];
+    $dow = (int) $dow;
+    if ($dow < 1 || $dow > 7) { promoWeekdayGrid($userId, $slotNum, $data); return; }
+    if (!isset($data['_sched_slots'])) $data['_sched_slots'] = [];
+    $data['_sched_slots'][$slotNum] = ['dow' => $dow];
+    $data['_sched_ctx'] = 'rec' . $slotNum;
+    $db->setState($userId, 'promo_sched_rec', $data);
+    $names = promoWeekdayNames();
+    promoTimeGrid($userId, "pschrt_{$slotNum}_",
+        "\xF0\x9F\x95\x92 <b>Time on {$names[$dow]}</b>\n\nWhat time should the post go out each " . $names[$dow] . "?",
+        'promo_sched_start');
+}
+
+function promoSchedPickTimeRecurring($userId, $slotNum, $hhmm, $state) {
+    global $db, $tg;
+    $data = $state['data'];
+    $slotNum = (int) $slotNum;
+
+    if ($hhmm === 'custom') {
+        $data['_sched_ctx'] = 'rec' . $slotNum;
+        $db->setState($userId, 'promo_sched_time_text', $data);
+        $tg->sendInlineButtons($userId,
+            "\xE2\x8C\xA8\xEF\xB8\x8F Type the time you want (e.g. <b>9:00 AM</b>, <b>2:30 PM</b>, or <b>14:30</b>):",
+            [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => "pschw_{$slotNum}_" . ($data['_sched_slots'][$slotNum]['dow'] ?? 1)]]]
+        );
+        return;
+    }
+
+    $hm = promoNormPickTime($hhmm);
+    if ($hm === null) { promoWeekdayGrid($userId, $slotNum, $data); return; }
+    $data['_sched_slots'][$slotNum]['time'] = $hm;
+    $db->setState($userId, 'promo_sched_rec', $data);
+
+    if ($slotNum === 1) {
+        // move on to the second weekly slot
+        promoWeekdayGrid($userId, 2, $data);
+    } else {
+        promoFinalizeRecurring($userId, $data);
+    }
+}
+
+function promoFinalizeRecurring($userId, $data) {
+    $slots = [];
+    foreach ([1, 2] as $n) {
+        if (!empty($data['_sched_slots'][$n]['dow']) && !empty($data['_sched_slots'][$n]['time'])) {
+            $slots[] = ['dow' => (int) $data['_sched_slots'][$n]['dow'], 'time' => $data['_sched_slots'][$n]['time']];
+        }
+    }
+    $data['schedule'] = ['mode' => 'recurring', 'slots' => $slots];
+
+    $tz = promoSchedTz();
+    $today = new DateTime('now', $tz); $today->setTime(0, 0);
+    $pkg = promoPackage($data['package_key'] ?? '');
+    $dur = (int) ($pkg['duration_days'] ?? 30);
+    $data['start_date'] = $today->format('Y-m-d');
+    $data['end_date'] = (clone $today)->modify("+{$dur} day")->format('Y-m-d');
+
+    unset($data['_sched_slots'], $data['_sched_ctx']);
+    promoSchedConfirm($userId, $data);
+}
+
+// Accept a raw HHMM tag from a button ("0830") or a normalized time.
+function promoNormPickTime($raw) {
+    $raw = trim((string) $raw);
+    if (preg_match('/^(\d{2})(\d{2})$/', $raw, $m)) {
+        $h = (int) $m[1]; $min = (int) $m[2];
+        if ($h <= 23 && $min <= 59) return sprintf('%02d:%02d', $h, $min);
+    }
+    return null;
+}
+
+// Parse a free-typed time like "9", "9am", "2:30 pm", "14:30".
+function promoParseTypedTime($text) {
+    $t = strtolower(trim($text));
+    $t = str_replace('.', ':', $t);
+    if (preg_match('/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/', $t, $m)) {
+        $h = (int) $m[1];
+        $min = isset($m[2]) && $m[2] !== '' ? (int) $m[2] : 0;
+        $ap = $m[3] ?? '';
+        if ($ap === 'am') { if ($h === 12) $h = 0; }
+        elseif ($ap === 'pm') { if ($h !== 12) $h += 12; }
+        if ($h <= 23 && $min <= 59) return sprintf('%02d:%02d', $h, $min);
+    }
+    return null;
+}
+
+// ---- Confirmation before submit ----
+
+function promoScheduleSummary($schedule) {
+    if (($schedule['mode'] ?? '') === 'single') {
+        $tz = promoSchedTz();
+        $d = DateTime::createFromFormat('Y-m-d', $schedule['date'], $tz);
+        $ds = $d ? $d->format('l, M j, Y') : $schedule['date'];
+        return "\xF0\x9F\x93\x85 " . $ds . " at " . promoTimeLabel($schedule['time']);
+    }
+    if (($schedule['mode'] ?? '') === 'recurring') {
+        $names = promoWeekdayNames();
+        $parts = [];
+        foreach ($schedule['slots'] as $s) {
+            $parts[] = ($names[$s['dow']] ?? '?') . "s at " . promoTimeLabel($s['time']);
+        }
+        return "\xF0\x9F\x94\x81 Every " . implode(" and ", $parts);
+    }
+    return '';
+}
+
+function promoSchedConfirm($userId, $data) {
+    global $tg, $db;
+    $db->setState($userId, 'promo_sched_confirm', $data);
+
+    $pkg = promoPackage($data['package_key'] ?? '');
+    $total = (int) ($data['posts_total'] ?? ($pkg['posts_total'] ?? 1));
+    $isResched = !empty($data['resched_id']);
+
+    $extra = '';
+    if (($data['schedule']['mode'] ?? '') === 'recurring') {
+        $extra = "\n\nWe'll auto-schedule up to <b>{$total}</b> posts on these days" .
+            (($data['package_key'] ?? '') === 'yearly'
+                ? ", opening one month at a time (the next month unlocks automatically as it gets close)."
+                : ", across the next 30 days.");
+    }
+
+    $saveBtn = $isResched
+        ? ['text' => "\xE2\x9C\x85 Save Schedule", 'callback_data' => 'promo_resched_save']
+        : ['text' => "\xE2\x9C\x85 Submit for Review", 'callback_data' => 'promo_submit'];
+
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x97\x93 <b>Confirm your schedule</b>\n\n" .
+        promoScheduleSummary($data['schedule']) . $extra . "\n\n" .
+        ($isResched ? "Save this new schedule?" : "Ready to submit for review?"),
+        [
+            [$saveBtn],
+            [
+                ['text' => "\xF0\x9F\x94\x84 Change", 'callback_data' => 'promo_sched_start'],
+                ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
+            ],
+        ]
+    );
+}
+
+// Reschedule save (from the dashboard "Select Another Slot"): update the
+// existing promotion's schedule and clear future bookings so the engine re-books.
+function promoReschedSave($userId, $state) {
+    global $tg, $db;
+    $data = $state['data'];
+    $promoId = (int) ($data['resched_id'] ?? 0);
+    if (!$promoId) { $db->setState($userId, 'idle', []); promoShowDashboard($userId); return; }
+
+    $db->updatePromotion($promoId, [
+        'schedule'   => $data['schedule'] ?? [],
+        'start_date' => $data['start_date'] ?? '',
+        'end_date'   => $data['end_date'] ?? '',
+    ]);
+    $db->clearFutureBookings($promoId);
+    $db->setState($userId, 'idle', []);
+
+    $tg->sendInlineButtons($userId,
+        "\xE2\x9C\x85 <b>Schedule updated!</b>\n\n" . promoScheduleSummary($data['schedule']) .
+        "\n\nYour upcoming posts will follow the new schedule.",
+        [[['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']]]
+    );
+}
+
+// ============================================================
+// USER DASHBOARD
+// ============================================================
+
+function promoActivePromotion($userId) {
+    global $db;
+    $all = $db->getUserPromotions($userId);
+    // Prefer an approved (running) promotion, else the most recent non-cancelled.
+    foreach ($all as $p) { if (($p['status'] ?? '') === 'approved') return $p; }
+    foreach ($all as $p) { if (in_array(($p['status'] ?? ''), ['pending_review'], true)) return $p; }
+    return $all[0] ?? null;
+}
+
+function promoStatusLabel($status) {
+    switch ($status) {
+        case 'approved': return "\xF0\x9F\x9F\xA2 Active";
+        case 'pending_review': return "\xF0\x9F\x95\x92 Pending Review";
+        case 'rejected': return "\xE2\x9D\x8C Not Approved";
+        case 'canceled': return "\xE2\x9A\xAA Cancelled";
+        default: return ucfirst($status ?: 'Draft');
+    }
+}
+
+function promoShowDashboard($userId) {
+    global $tg, $db;
+    $db->setState($userId, 'idle', []);
+
+    $promo = promoActivePromotion($userId);
+    if (!$promo) {
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x93\x8A <b>Your Promotion Dashboard</b>\n\n" .
+            "You don't have any promotions yet. Tap below to promote your business in the HabeshaList group.",
+            [
+                [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
+                [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
+            ]
+        );
+        return;
+    }
+
+    $pid = (int) $promo['id'];
+    $pkg = promoPackage($promo['package_key'] ?? '');
+    $planName = $pkg['name'] ?? 'Promotion';
+    $total = (int) ($promo['posts_total'] ?: ($pkg['posts_total'] ?? 1));
+    $used = (int) ($promo['posts_used'] ?? 0);
+    $remaining = max(0, $total - $used);
+    $tz = promoSchedTz();
+
+    $lines = [];
+    $lines[] = "\xF0\x9F\x93\x8A <b>Your Promotion Dashboard</b>";
+    $lines[] = '';
+    $lines[] = "\xF0\x9F\x93\xA6 Plan: <b>{$planName}</b>";
+    $lines[] = "Status: <b>" . promoStatusLabel($promo['status'] ?? '') . "</b>";
+    if (!empty($promo['start_date'])) {
+        $sd = DateTime::createFromFormat('Y-m-d', substr($promo['start_date'], 0, 10), $tz);
+        $ed = !empty($promo['end_date']) ? DateTime::createFromFormat('Y-m-d', substr($promo['end_date'], 0, 10), $tz) : null;
+        $line = "\xF0\x9F\x93\x85 " . ($sd ? $sd->format('M j, Y') : $promo['start_date']);
+        if ($ed) $line .= " \xE2\x86\x92 " . $ed->format('M j, Y');
+        $lines[] = $line;
+    }
+    $lines[] = '';
+    $lines[] = "\xF0\x9F\x93\x9D Remaining posts: <b>{$remaining} / {$total}</b>";
+
+    $next = $db->getNextPost($pid);
+    if ($next) {
+        $nd = DateTime::createFromFormat('Y-m-d', $next['post_date'], $tz);
+        $nt = !empty($next['post_time']) ? $next['post_time'] : '';
+        $lines[] = "\xE2\x8F\xAD\xEF\xB8\x8F Next post: <b>" . ($nd ? $nd->format('M j, Y') : $next['post_date']) .
+            ($nt ? " at " . promoTimeLabel($nt) : '') . "</b>";
+    } else {
+        $lines[] = "\xE2\x8F\xAD\xEF\xB8\x8F Next post: <b>-</b>";
+    }
+
+    $pin = $db->getActivePin($pid);
+    if ($pin) {
+        $left = strtotime($pin['pin_until'] . ' UTC') - time();
+        $hrs = max(1, (int) ceil($left / 3600));
+        $lines[] = "\xF0\x9F\x93\x8C Pinned message: <b>Active ({$hrs}h left)</b>";
+    }
+
+    $rows = [];
+    $rows[] = [
+        ['text' => "\xF0\x9F\x93\x86 View Schedule", 'callback_data' => "dash_sched_{$pid}"],
+        ['text' => "\xF0\x9F\x93\x91 My Ads", 'callback_data' => 'dash_ads'],
+    ];
+    $rows[] = [['text' => "\xF0\x9F\x92\xB3 Payment History", 'callback_data' => 'dash_pay']];
+    if (($promo['status'] ?? '') === 'approved') {
+        $rows[] = [
+            ['text' => "\xF0\x9F\x93\x85 Select Another Slot", 'callback_data' => "dash_slot_{$pid}"],
+            ['text' => "\xF0\x9F\x9B\x91 Cancel Plan", 'callback_data' => "dash_cancel_{$pid}"],
+        ];
+    }
+    $rows[] = [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']];
+
+    $tg->sendInlineButtons($userId, implode("\n", $lines), $rows);
+}
+
+function promoDashViewSchedule($userId, $promoId) {
+    global $tg, $db;
+    $promo = $db->getPromotion($promoId);
+    if (!$promo || $promo['telegram_id'] != $userId) { promoShowDashboard($userId); return; }
+    $tz = promoSchedTz();
+    $rows = $db->getUpcomingPosts($promoId, 20);
+
+    $txt = "\xF0\x9F\x93\x86 <b>Upcoming Schedule - " . ($promo['business_name'] ?: 'Your promotion') . "</b>\n\n";
+    if (empty($rows)) {
+        $txt .= "No upcoming posts scheduled right now.";
+        if (($promo['status'] ?? '') === 'pending_review') $txt .= "\n\nYour posts will be scheduled as soon as your promotion is approved.";
+    } else {
+        foreach ($rows as $r) {
+            $d = DateTime::createFromFormat('Y-m-d', $r['post_date'], $tz);
+            $t = !empty($r['post_time']) ? $r['post_time'] : '';
+            $pinTag = ((int) $r['pin'] === 1) ? "  \xF0\x9F\x93\x8C" : '';
+            $txt .= "\xE2\x80\xA2 " . ($d ? $d->format('D, M j') : $r['post_date']) . ($t ? " - " . promoTimeLabel($t) : '') . $pinTag . "\n";
+        }
+        $txt .= "\n\xF0\x9F\x93\x8C = pinned post";
+    }
+
+    $tg->sendInlineButtons($userId, $txt, [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Dashboard", 'callback_data' => 'promo_dashboard']]]);
+}
+
+function promoDashMyAds($userId) {
+    global $tg, $db;
+    $all = $db->getUserPromotions($userId);
+    $txt = "\xF0\x9F\x93\x91 <b>My Promotions</b>\n\n";
+    if (empty($all)) {
+        $txt .= "You haven't created any promotions yet.";
+    } else {
+        foreach ($all as $p) {
+            $pkg = promoPackage($p['package_key'] ?? '');
+            $txt .= "\xF0\x9F\x8F\xA2 <b>" . ($p['business_name'] ?: 'Untitled') . "</b>\n";
+            $txt .= "   " . ($pkg['name'] ?? $p['package_key']) . " - " . promoStatusLabel($p['status'] ?? '') .
+                " (" . (int) ($p['posts_used'] ?? 0) . "/" . (int) ($p['posts_total'] ?? 0) . " posts)\n";
+        }
+    }
+    $tg->sendInlineButtons($userId, $txt, [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Dashboard", 'callback_data' => 'promo_dashboard']]]);
+}
+
+function promoDashPayments($userId) {
+    global $tg, $db;
+    $all = $db->getUserPromotions($userId);
+    $txt = "\xF0\x9F\x92\xB3 <b>Payment History</b>\n\n";
+    $any = false;
+    foreach ($all as $p) {
+        if (empty($p['receipt']) && empty($p['payment_method'])) continue;
+        $any = true;
+        $pkg = promoPackage($p['package_key'] ?? '');
+        $txt .= "\xF0\x9F\xA7\xBE " . ($p['receipt'] ?: '-') . "\n";
+        $txt .= "   " . ($pkg['name'] ?? $p['package_key']) . " - " . promoFmtPrice($p['price'] ?? 0) . "\n";
+        $txt .= "   " . strtoupper($p['payment_method'] ?: 'n/a') . " - " . ($p['payment_status'] ?: 'pending') . "\n\n";
+    }
+    if (!$any) $txt .= "No payments on record yet.";
+    $tg->sendInlineButtons($userId, $txt, [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Dashboard", 'callback_data' => 'promo_dashboard']]]);
+}
+
+function promoDashSelectSlot($userId, $promoId) {
+    global $tg, $db;
+    $promo = $db->getPromotion($promoId);
+    if (!$promo || $promo['telegram_id'] != $userId) { promoShowDashboard($userId); return; }
+
+    // Load the promotion into a scheduling session flagged as a reschedule.
+    $data = [
+        'resched_id'  => (int) $promoId,
+        'package_key' => $promo['package_key'],
+        'posts_total' => (int) $promo['posts_total'],
+        'price'       => $promo['price'],
+    ];
+    $db->setState($userId, 'promo_sched_date', $data);
+    promoSchedStart($userId, ['data' => $data]);
+}
+
+function promoDashCancelConfirm($userId, $promoId) {
+    global $tg, $db;
+    $promo = $db->getPromotion($promoId);
+    if (!$promo || $promo['telegram_id'] != $userId) { promoShowDashboard($userId); return; }
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x9B\x91 <b>Cancel this plan?</b>\n\n" .
+        "This stops all future scheduled posts for <b>" . ($promo['business_name'] ?: 'your promotion') . "</b>. " .
+        "Posts already published in the group stay up.\n\n" .
+        "This can't be undone. Are you sure?",
+        [
+            [['text' => "\xE2\x9C\x85 Yes, cancel plan", 'callback_data' => "dash_cancelyes_{$promoId}"]],
+            [['text' => "\xE2\xAC\x85\xEF\xB8\x8F No, keep it", 'callback_data' => 'promo_dashboard']],
+        ]
+    );
+}
+
+function promoDashDoCancel($userId, $promoId) {
+    global $tg, $db;
+    $promo = $db->getPromotion($promoId);
+    if (!$promo || $promo['telegram_id'] != $userId) { promoShowDashboard($userId); return; }
+    $db->cancelPromotionSchedule($promoId);
+    $tg->sendInlineButtons($userId,
+        "\xE2\x9A\xAA Your plan for <b>" . ($promo['business_name'] ?: 'your promotion') . "</b> has been cancelled. " .
+        "No further posts will go out.\n\nIf you have any questions about a refund, please contact support.",
+        [[['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']]]
+    );
 }

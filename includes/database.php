@@ -90,6 +90,29 @@ class Database {
             )
         ");
 
+        // Scheduled group posts (written by the scheduler engine; the bot reads
+        // them for the user dashboard). Created here too so dashboard queries are
+        // always safe even before the scheduler has run once.
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS scheduled_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                promotion_id INTEGER NOT NULL,
+                business_name TEXT,
+                package_key TEXT,
+                post_date TEXT NOT NULL,
+                slot TEXT NOT NULL,
+                post_time TEXT,
+                pin INTEGER DEFAULT 0,
+                pin_hours INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'scheduled',
+                tg_message_id INTEGER,
+                pin_until TEXT,
+                posted_at TEXT,
+                error TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
+
         // Migration: link bot users to their OSClass website account
         $cols = [];
         $res = $this->db->query("PRAGMA table_info(users)");
@@ -266,6 +289,59 @@ class Database {
             $rows[] = $row;
         }
         return $rows;
+    }
+
+    // ---- Scheduled posts (read for the user dashboard) ----
+
+    // Upcoming (not-yet-posted) bookings for a promotion, earliest first.
+    public function getUpcomingPosts($promoId, $limit = 20) {
+        $stmt = $this->db->prepare("SELECT * FROM scheduled_posts
+            WHERE promotion_id = :p AND status = 'scheduled'
+            ORDER BY post_date ASC, COALESCE(post_time,'') ASC, id ASC LIMIT :l");
+        $stmt->bindValue(':p', $promoId, SQLITE3_INTEGER);
+        $stmt->bindValue(':l', $limit, SQLITE3_INTEGER);
+        $res = $stmt->execute();
+        $rows = [];
+        while ($row = $res->fetchArray(SQLITE3_ASSOC)) { $rows[] = $row; }
+        return $rows;
+    }
+
+    // The single next post that will go out for a promotion.
+    public function getNextPost($promoId) {
+        $stmt = $this->db->prepare("SELECT * FROM scheduled_posts
+            WHERE promotion_id = :p AND status = 'scheduled'
+            ORDER BY post_date ASC, COALESCE(post_time,'') ASC, id ASC LIMIT 1");
+        $stmt->bindValue(':p', $promoId, SQLITE3_INTEGER);
+        return $stmt->execute()->fetchArray(SQLITE3_ASSOC) ?: null;
+    }
+
+    // A currently-pinned post for a promotion (pin still within its window), if any.
+    public function getActivePin($promoId) {
+        $nowUtc = gmdate('Y-m-d H:i:s');
+        $stmt = $this->db->prepare("SELECT * FROM scheduled_posts
+            WHERE promotion_id = :p AND status = 'posted' AND pin = 1
+              AND pin_until IS NOT NULL AND pin_until > :now
+            ORDER BY pin_until DESC LIMIT 1");
+        $stmt->bindValue(':p', $promoId, SQLITE3_INTEGER);
+        $stmt->bindValue(':now', $nowUtc, SQLITE3_TEXT);
+        return $stmt->execute()->fetchArray(SQLITE3_ASSOC) ?: null;
+    }
+
+    // Cancel a plan: stop all future (not-yet-posted) group posts. Anything
+    // already posted stays up. No refund logic here - that's a manual decision.
+    public function cancelPromotionSchedule($promoId) {
+        $this->db->exec("UPDATE scheduled_posts SET status = 'canceled'
+            WHERE promotion_id = " . (int) $promoId . " AND status = 'scheduled'");
+        $stmt = $this->db->prepare("UPDATE promotions SET status = 'canceled' WHERE id = :id");
+        $stmt->bindValue(':id', $promoId, SQLITE3_INTEGER);
+        return $stmt->execute();
+    }
+
+    // Clear future bookings so the scheduler re-books from an updated schedule
+    // (used when the user changes their slots from the dashboard).
+    public function clearFutureBookings($promoId) {
+        return $this->db->exec("DELETE FROM scheduled_posts
+            WHERE promotion_id = " . (int) $promoId . " AND status = 'scheduled'");
     }
 
     public function updatePromotion($id, $fields) {

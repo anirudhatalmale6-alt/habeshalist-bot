@@ -47,7 +47,8 @@ class HL_Scheduler {
                 business_name TEXT,
                 package_key TEXT,
                 post_date TEXT NOT NULL,        -- YYYY-MM-DD in the schedule timezone
-                slot TEXT NOT NULL,             -- morning | lunch | evening
+                slot TEXT NOT NULL,             -- morning | lunch | evening | custom
+                post_time TEXT,                 -- HH:MM in the schedule timezone (user-chosen); overrides slot
                 pin INTEGER DEFAULT 0,
                 pin_hours INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'scheduled',-- scheduled | posted | failed | canceled
@@ -58,6 +59,14 @@ class HL_Scheduler {
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ");
+
+        // Migration: add post_time to older tables that predate user-chosen times.
+        $cols = [];
+        $res = $this->db->query("PRAGMA table_info(scheduled_posts)");
+        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $cols[] = $r['name']; }
+        if (!in_array('post_time', $cols, true)) {
+            $this->db->exec("ALTER TABLE scheduled_posts ADD COLUMN post_time TEXT");
+        }
     }
 
     // ---- settings helpers ----
@@ -129,7 +138,158 @@ class HL_Scheduler {
         return false;
     }
 
+    // Dispatch: honour the schedule the user picked in the bot. If a promotion
+    // has no user schedule (e.g. created straight from the admin panel), fall
+    // back to the automatic spread so nothing is ever left unposted.
     private function bookPromo($promo) {
+        $schedule = [];
+        if (!empty($promo['schedule'])) {
+            $decoded = json_decode($promo['schedule'], true);
+            if (is_array($decoded)) $schedule = $decoded;
+        }
+        $mode = $schedule['mode'] ?? '';
+
+        if ($mode === 'single' && !empty($schedule['date'])) {
+            $this->bookSingle($promo, $schedule);
+            return;
+        }
+        if ($mode === 'recurring' && !empty($schedule['slots'])) {
+            $this->bookRecurring($promo, $schedule);
+            return;
+        }
+        $this->bookPromoLegacy($promo);
+    }
+
+    // Normalise a HH:MM string to zero-padded 24h (e.g. "8:30" -> "08:30").
+    private function normTime($t) {
+        $t = trim((string) $t);
+        if (preg_match('/^(\d{1,2}):(\d{2})$/', $t, $m)) {
+            $h = max(0, min(23, (int) $m[1]));
+            $min = max(0, min(59, (int) $m[2]));
+            return sprintf('%02d:%02d', $h, $min);
+        }
+        return '12:00';
+    }
+
+    // Give the booking a friendly slot label if the time matches a configured
+    // slot; otherwise 'custom' (the exact time is stored in post_time anyway).
+    private function slotLabelFor($time) {
+        foreach ($this->slotTimes() as $name => $hm) {
+            if ($this->normTime($hm) === $this->normTime($time)) return $name;
+        }
+        return 'custom';
+    }
+
+    private function hasBookingAt($promoId, $date, $time) {
+        $stmt = $this->db->prepare("SELECT COUNT(*) c FROM scheduled_posts
+            WHERE promotion_id=:p AND post_date=:d AND COALESCE(post_time,'')=:t
+              AND status IN ('scheduled','posted')");
+        $stmt->bindValue(':p', (int) $promoId, SQLITE3_INTEGER);
+        $stmt->bindValue(':d', $date, SQLITE3_TEXT);
+        $stmt->bindValue(':t', $time, SQLITE3_TEXT);
+        $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+        return ((int) ($row['c'] ?? 0)) > 0;
+    }
+
+    private function countBookings($promoId) {
+        $stmt = $this->db->prepare("SELECT COUNT(*) c FROM scheduled_posts
+            WHERE promotion_id=:p AND status IN ('scheduled','posted')");
+        $stmt->bindValue(':p', (int) $promoId, SQLITE3_INTEGER);
+        $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+        return (int) ($row['c'] ?? 0);
+    }
+
+    private function monthHasBooking($promoId, $ym) {
+        $stmt = $this->db->prepare("SELECT COUNT(*) c FROM scheduled_posts
+            WHERE promotion_id=:p AND substr(post_date,1,7)=:m AND status IN ('scheduled','posted')");
+        $stmt->bindValue(':p', (int) $promoId, SQLITE3_INTEGER);
+        $stmt->bindValue(':m', $ym, SQLITE3_TEXT);
+        $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+        return ((int) ($row['c'] ?? 0)) > 0;
+    }
+
+    // ---- user-chosen: a single dated post (one-time, and Business of the Week) ----
+    private function bookSingle($promo, $schedule) {
+        $key = $promo['package_key'] ?: 'one_time';
+        $tz = $this->tz();
+        $date = substr($schedule['date'], 0, 10);
+        $time = $this->normTime($schedule['time'] ?? '12:00');
+
+        if ($this->hasBookingAt($promo['id'], $date, $time)) {
+            $this->log[] = "promo {$promo['id']}: single already booked"; return;
+        }
+
+        $pin = 0; $pinHours = 0;
+        if ($key === 'botw') {
+            $d = DateTime::createFromFormat('Y-m-d', $date, $tz);
+            if ($d instanceof DateTime && $this->botwWeekTaken($d->format('o-W'), $promo['id'])) {
+                $this->log[] = "promo {$promo['id']} (botw): chosen week already taken"; return;
+            }
+            $pin = 1; $pinHours = 24 * 7;
+        }
+        $this->insertBooking($promo, $date, $this->slotLabelFor($time), $time, $pin, $pinHours);
+        $this->log[] = "promo {$promo['id']} ({$key}): booked single {$date} {$time}" . ($pin ? ' + pinned' : '');
+    }
+
+    // ---- user-chosen: recurring weekly slots (monthly & yearly) ----
+    // Books occurrences of the chosen weekday+time slots that fall inside a
+    // rolling 30-day window, up to the remaining post allowance. Because the
+    // window slides forward every run, a yearly plan naturally unlocks the next
+    // month's posts about a week before the current window runs out - no giant
+    // calendar, exactly "one month at a time".
+    private function bookRecurring($promo, $schedule) {
+        $key = $promo['package_key'] ?: 'one_time';
+        $pkg = $this->pkg($key);
+        $total = (int) ($promo['posts_total'] ?: ($pkg['posts_total'] ?? 0));
+        $already = $this->countBookings($promo['id']);
+        $remaining = $total - $already;
+        if ($remaining <= 0) { $this->log[] = "promo {$promo['id']}: allowance full ({$already}/{$total})"; return; }
+
+        $slots = $schedule['slots'];
+        $tz = $this->tz();
+        $today = new DateTime('now', $tz); $today->setTime(0, 0);
+        $start = clone $today;
+        if (!empty($promo['start_date'])) {
+            $sd = DateTime::createFromFormat('Y-m-d', substr($promo['start_date'], 0, 10), $tz);
+            if ($sd instanceof DateTime && $sd > $start) { $start = $sd; $start->setTime(0, 0); }
+        }
+        $windowDays = 30;
+        $windowEnd = (clone $today)->modify("+{$windowDays} day");
+
+        // Build candidate occurrences of each weekly slot inside the window.
+        $cands = [];
+        foreach ($slots as $s) {
+            $dow = (int) ($s['dow'] ?? 0);          // 1=Mon .. 7=Sun (ISO)
+            if ($dow < 1 || $dow > 7) continue;
+            $time = $this->normTime($s['time'] ?? '12:00');
+            $cur = clone $start;
+            while ($cur <= $windowEnd) {
+                if ((int) $cur->format('N') === $dow) {
+                    $cands[] = ['date' => $cur->format('Y-m-d'), 'time' => $time];
+                }
+                $cur->modify('+1 day');
+            }
+        }
+        usort($cands, function ($a, $b) {
+            return strcmp($a['date'] . $a['time'], $b['date'] . $b['time']);
+        });
+
+        $placed = 0;
+        foreach ($cands as $c) {
+            if ($remaining <= 0) break;
+            if ($this->hasBookingAt($promo['id'], $c['date'], $c['time'])) continue;
+
+            $pin = 0; $pinHours = 0;
+            if ($key === 'monthly' && $this->countBookings($promo['id']) === 0) { $pin = 1; $pinHours = 24; }
+            if ($key === 'yearly' && !$this->monthHasBooking($promo['id'], substr($c['date'], 0, 7))) { $pin = 1; $pinHours = 24; }
+
+            $this->insertBooking($promo, $c['date'], $this->slotLabelFor($c['time']), $c['time'], $pin, $pinHours);
+            $placed++; $remaining--;
+        }
+        $this->log[] = "promo {$promo['id']} ({$key}): recurring booked {$placed}, " . max(0, $remaining) . " left of allowance";
+    }
+
+    private function bookPromoLegacy($promo) {
         $key = $promo['package_key'] ?: 'one_time';
         $pkg = $this->pkg($key);
         $total = (int) ($promo['posts_total'] ?: ($pkg['posts_total'] ?? 1));
@@ -160,7 +320,7 @@ class HL_Scheduler {
                 if (!$this->botwWeekTaken($isoWeek, $promo['id'])) {
                     foreach ($slots as $slot) {
                         if ($this->slotFree($date, $slot)) {
-                            $this->insertBooking($promo, $date, $slot, 1, 24 * 7);
+                            $this->insertBooking($promo, $date, $slot, null, 1, 24 * 7);
                             $this->log[] = "promo {$promo['id']} (botw): booked {$date} {$slot}, pinned 7d";
                             return;
                         }
@@ -191,7 +351,7 @@ class HL_Scheduler {
                 if ($key === 'monthly' && $placed === 0) { $pin = 1; $pinHours = 24; }
                 if ($key === 'yearly' && empty($monthsPinned[$month])) { $pin = 1; $pinHours = 24; $monthsPinned[$month] = true; }
 
-                $this->insertBooking($promo, $date, $slot, $pin, $pinHours);
+                $this->insertBooking($promo, $date, $slot, null, $pin, $pinHours);
                 $placed++;
                 $weekCount[$wk] = ($weekCount[$wk] ?? 0) + 1;
                 break; // at most one post per day for a given promo, so posts stay spread out
@@ -201,15 +361,16 @@ class HL_Scheduler {
         $this->log[] = "promo {$promo['id']} ({$key}): booked {$placed}/{$toPlace} posts";
     }
 
-    private function insertBooking($promo, $date, $slot, $pin, $pinHours) {
+    private function insertBooking($promo, $date, $slot, $postTime, $pin, $pinHours) {
         $stmt = $this->db->prepare("
-            INSERT INTO scheduled_posts (promotion_id, business_name, package_key, post_date, slot, pin, pin_hours, status)
-            VALUES (:pid, :bn, :pk, :d, :s, :pin, :ph, 'scheduled')");
+            INSERT INTO scheduled_posts (promotion_id, business_name, package_key, post_date, slot, post_time, pin, pin_hours, status)
+            VALUES (:pid, :bn, :pk, :d, :s, :pt, :pin, :ph, 'scheduled')");
         $stmt->bindValue(':pid', (int) $promo['id'], SQLITE3_INTEGER);
         $stmt->bindValue(':bn', $promo['business_name'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':pk', $promo['package_key'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':d', $date, SQLITE3_TEXT);
         $stmt->bindValue(':s', $slot, SQLITE3_TEXT);
+        $stmt->bindValue(':pt', $postTime, $postTime === null ? SQLITE3_NULL : SQLITE3_TEXT);
         $stmt->bindValue(':pin', (int) $pin, SQLITE3_INTEGER);
         $stmt->bindValue(':ph', (int) $pinHours, SQLITE3_INTEGER);
         $stmt->execute();
@@ -225,7 +386,8 @@ class HL_Scheduler {
         $res = $this->db->query("SELECT * FROM scheduled_posts WHERE status='scheduled' ORDER BY post_date ASC, id ASC");
         $due = [];
         while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
-            $hm = $slotTimes[$r['slot']] ?? '00:00';
+            // Prefer the exact user-chosen time; fall back to the named slot's time.
+            $hm = !empty($r['post_time']) ? $r['post_time'] : ($slotTimes[$r['slot']] ?? '00:00');
             $when = DateTime::createFromFormat('Y-m-d H:i', $r['post_date'] . ' ' . $hm, $tz);
             if ($when instanceof DateTime && $when <= $now) { $due[] = $r; }
         }
@@ -321,6 +483,12 @@ class HL_Scheduler {
 
     // ---- post text ----
     private function buildPostText($promo) {
+        return self::renderPostText($promo);
+    }
+
+    // Public + static so the bot can render an identical preview before submit
+    // (single source of truth for how a promotion looks in the group).
+    public static function renderPostText($promo) {
         $e = function ($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); };
         $lines = [];
         $lines[] = "\xF0\x9F\x93\xA2 <b>" . $e($promo['business_name'] ?: 'Featured Business') . "</b>";

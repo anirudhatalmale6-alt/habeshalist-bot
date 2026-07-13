@@ -4,6 +4,7 @@ $config = require __DIR__ . '/config/config.php';
 require_once __DIR__ . '/includes/database.php';
 require_once __DIR__ . '/includes/telegram.php';
 require_once __DIR__ . '/includes/promotion.php';
+require_once __DIR__ . '/includes/scheduler.php'; // for HL_Scheduler::renderPostText() preview
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
@@ -149,6 +150,40 @@ function handleCallbackQuery($query) {
     if (strpos($data, 'promo_reject_') === 0) { promoModerate($userId, (int)substr($data, 13), 'reject'); return; }
     if ($data === 'promo_admin_menu') { promoAdminMenu($userId); return; }
     if (strpos($data, 'promoset_') === 0) { promoAdminEdit($userId, substr($data, 9)); return; }
+
+    // ---- Preview + scheduling picker ----
+
+    if ($data === 'promo_preview') { promoShowPreview($userId, $state['data']); return; }
+    if ($data === 'promo_sched_start') { promoSchedStart($userId, $state); return; }
+    if (strpos($data, 'pschd_') === 0) { promoSchedPickDate($userId, substr($data, 6), $state); return; }
+    if (strpos($data, 'pschrt_') === 0) {
+        $rest = substr($data, 7);                 // "<slot>_<hhmm|custom>"
+        $us = strpos($rest, '_');
+        if ($us !== false) {
+            promoSchedPickTimeRecurring($userId, substr($rest, 0, $us), substr($rest, $us + 1), $state);
+        }
+        return;
+    }
+    if (strpos($data, 'pscht_') === 0) { promoSchedPickTimeSingle($userId, substr($data, 6), $state); return; }
+    if (strpos($data, 'pschw_') === 0) {
+        $rest = substr($data, 6);                 // "<slot>_<dow>"
+        $us = strpos($rest, '_');
+        if ($us !== false) {
+            promoSchedPickWeekday($userId, (int) substr($rest, 0, $us), substr($rest, $us + 1), $state);
+        }
+        return;
+    }
+    if ($data === 'promo_resched_save') { promoReschedSave($userId, $state); return; }
+
+    // ---- User dashboard ----
+
+    if ($data === 'promo_dashboard') { promoShowDashboard($userId); return; }
+    if (strpos($data, 'dash_sched_') === 0) { promoDashViewSchedule($userId, (int) substr($data, 11)); return; }
+    if ($data === 'dash_ads') { promoDashMyAds($userId); return; }
+    if ($data === 'dash_pay') { promoDashPayments($userId); return; }
+    if (strpos($data, 'dash_slot_') === 0) { promoDashSelectSlot($userId, (int) substr($data, 10)); return; }
+    if (strpos($data, 'dash_cancelyes_') === 0) { promoDashDoCancel($userId, (int) substr($data, 15)); return; }
+    if (strpos($data, 'dash_cancel_') === 0) { promoDashCancelConfirm($userId, (int) substr($data, 12)); return; }
 
     // ---- Category / Subcategory ----
 
@@ -456,6 +491,17 @@ function handleMessage($msg) {
         if (isAdmin($userId)) {
             $db->setState($userId, 'idle', []);
             promoAdminMenu($userId);
+        }
+        return;
+    }
+
+    // /dashboard in private chat
+    if ($isPrivate && $text === '/dashboard') {
+        $user = $db->getUser($userId);
+        if ($user) {
+            promoShowDashboard($userId);
+        } else {
+            startRegistration($userId, 'dashboard');
         }
         return;
     }
@@ -879,6 +925,13 @@ function handleAction($userId, $action) {
             break;
         case 'contact':
             showContactInfo($userId);
+            break;
+        case 'dashboard':
+            if (!$db->getUser($userId)) {
+                startRegistration($userId, 'dashboard');
+                break;
+            }
+            promoShowDashboard($userId);
             break;
         default:
             $user = $db->getUser($userId);
@@ -1452,6 +1505,7 @@ function showMainMenu($userId, $name) {
             [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
             [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'callback_data' => 'botw']],
+            [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
         ]
     );

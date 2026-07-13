@@ -41,6 +41,7 @@ if ($flash) hl_flash($flash, $flashType);
         <td class="muted small"><?= h($p['created_at']) ?></td>
         <td>
           <div class="actions">
+            <a class="btn sm ghost" href="preview.php?id=<?= (int) $p['id'] ?>">Preview</a>
             <form method="post"><input type="hidden" name="csrf" value="<?= $csrf ?>">
               <input type="hidden" name="action" value="approve"><input type="hidden" name="promo_id" value="<?= (int) $p['id'] ?>">
               <button class="btn sm" type="submit">Approve</button></form>
@@ -57,6 +58,6 @@ if ($flash) hl_flash($flash, $flashType);
   <?php endif; ?>
 </div>
 
-<p class="muted small">Note: the ad photos and payment proof still arrive in your Telegram admin chat when a promotion is submitted. Viewing those inside this panel is part of a later milestone.</p>
+<p class="muted small">Tip: tap Preview to see the full ad - logo, images, post text and chosen schedule - exactly as it will appear in the group, with Approve/Reject right there.</p>
 
 <?php hl_shell_foot();
