@@ -310,6 +310,9 @@ function hl_moderate_promo($promoId, $decision) {
 
     if ($decision === 'approve') {
         $db->exec("UPDATE promotions SET status='approved', payment_status='verified' WHERE id=" . (int) $promoId);
+        // Book the schedule immediately so the calendar / scheduled list reflect
+        // it right away, instead of waiting for the next cron tick.
+        hl_book_promo_now((int) $promoId);
         $text = "\xF0\x9F\x8E\x89 <b>Great news!</b> Your promotion for <b>" . $bname . "</b> has been approved.\n\n"
               . "It will be posted in the HabeshaList Telegram Group as scheduled. You'll be notified once it goes live. Thank you!";
         $verb = 'Approved';
@@ -349,12 +352,51 @@ function hl_sched($key) {
 }
 // The panel reads scheduled_posts; create it if the cron has not run yet.
 function hl_ensure_scheduled_table() {
-    hl_db()->exec("CREATE TABLE IF NOT EXISTS scheduled_posts (
+    $db = hl_db();
+    $db->exec("CREATE TABLE IF NOT EXISTS scheduled_posts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, promotion_id INTEGER NOT NULL,
         business_name TEXT, package_key TEXT, post_date TEXT NOT NULL, slot TEXT NOT NULL,
+        post_time TEXT,
         pin INTEGER DEFAULT 0, pin_hours INTEGER DEFAULT 0, status TEXT DEFAULT 'scheduled',
         tg_message_id INTEGER, pin_until TEXT, posted_at TEXT, error TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP)");
+    // Older tables (created before user-chosen times) may lack post_time.
+    $cols = [];
+    $res = $db->query("PRAGMA table_info(scheduled_posts)");
+    while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $cols[] = $r['name']; }
+    if (!in_array('post_time', $cols, true)) {
+        $db->exec("ALTER TABLE scheduled_posts ADD COLUMN post_time TEXT");
+    }
+}
+
+// The bot's root folder (where includes/ and config/ live), derived from the
+// shared database path so it works regardless of what the panel folder is named.
+function hl_bot_root() {
+    return BOT_DB_PATH !== '' ? dirname(dirname(BOT_DB_PATH)) : '';
+}
+
+// Book an approved promotion's schedule straight away, from the browser. Booking
+// only writes scheduled_posts rows (it never calls Telegram), so it is safe here;
+// the cron still handles the actual posting/pinning. Silently no-ops if the bot
+// code isn't reachable - the cron will book it on its next run instead.
+function hl_book_promo_now($promoId) {
+    $root = hl_bot_root();
+    if ($root === '') return;
+    $sched = $root . '/includes/scheduler.php';
+    $tglib = $root . '/includes/telegram.php';
+    $cfgf  = $root . '/config/config.php';
+    if (!is_file($sched) || !is_file($tglib) || !is_file($cfgf)) return;
+    try {
+        require_once $tglib;
+        require_once $sched;
+        $config = require $cfgf;
+        $token = hl_effective_secret('TELEGRAM_BOT_TOKEN', 'sec_bot_token');
+        $tg = new Telegram($token !== '' ? $token : '0:book');
+        $engine = new HL_Scheduler(BOT_DB_PATH, $tg, is_array($config) ? $config : []);
+        $engine->bookPromoById((int) $promoId);
+    } catch (\Throwable $e) {
+        // Leave it for the cron; don't block the approval.
+    }
 }
 function hl_slot_label($slot) {
     $t = hl_sched('sched_slot_' . $slot);
@@ -363,6 +405,24 @@ function hl_slot_label($slot) {
 }
 function hl_plan_name($key) {
     return HL_PACKAGES[$key]['name'] ?? ($key !== '' ? $key : '-');
+}
+// "14:30" -> "2:30 PM". Leaves anything unparseable untouched.
+function hl_fmt_time($hm) {
+    $hm = trim((string) $hm);
+    if (preg_match('/^(\d{1,2}):(\d{2})$/', $hm, $m)) {
+        $h = (int) $m[1]; $min = (int) $m[2];
+        if ($h >= 0 && $h <= 23 && $min >= 0 && $min <= 59) {
+            $ap = $h < 12 ? 'AM' : 'PM'; $h12 = $h % 12; if ($h12 === 0) $h12 = 12;
+            return sprintf('%d:%02d %s', $h12, $min, $ap);
+        }
+    }
+    return $hm !== '' ? $hm : '-';
+}
+// "2026-07-21" -> "Tue, Jul 21".
+function hl_fmt_date($ymd) {
+    $ymd = trim((string) $ymd);
+    $d = DateTime::createFromFormat('Y-m-d', substr($ymd, 0, 10));
+    return $d ? $d->format('D, M j') : ($ymd !== '' ? $ymd : '-');
 }
 function hl_money($n) {
     $s = number_format((float) $n, 2);

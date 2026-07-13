@@ -104,6 +104,18 @@ class HL_Scheduler {
         return $this->log;
     }
 
+    // Book a single promotion right now (used by the admin panel the moment an
+    // ad is approved, so the schedule shows up without waiting for the next cron
+    // tick). Booking never touches Telegram - only postDue() does - so this is
+    // safe to call from the browser. Idempotent: bookPromo de-dupes.
+    public function bookPromoById($id) {
+        $stmt = $this->db->prepare("SELECT * FROM promotions WHERE id = :id");
+        $stmt->bindValue(':id', (int) $id, SQLITE3_INTEGER);
+        $p = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+        if ($p && ($p['status'] ?? '') === 'approved') { $this->bookPromo($p); }
+        return $this->log;
+    }
+
     // ---- 1) booking ----
     public function bookApproved() {
         $res = $this->db->query("
