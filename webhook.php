@@ -10,8 +10,14 @@ require_once __DIR__ . '/includes/scheduler.php'; // for HL_Scheduler::renderPos
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
 if (!isset($tg)) $tg = new Telegram($config['bot_token']);
 
-// Only dispatch incoming updates when served over HTTP (skipped under CLI tests).
-if (php_sapi_name() !== 'cli') {
+// Only dispatch incoming updates when served over a real HTTP request. When
+// this file is required from poll.php (cron) or from CLI tests there is no HTTP
+// method set, so we must NOT dispatch here - we only set up handlers. Detecting
+// "no REQUEST_METHOD" is more reliable than checking the SAPI name, because some
+// cron setups on this host run the CGI PHP binary (SAPI 'cgi-fcgi') with no web
+// request behind it.
+$isHttpRequest = !empty($_SERVER['REQUEST_METHOD']) && php_sapi_name() !== 'cli';
+if ($isHttpRequest) {
     // Verify the request really comes from Telegram. Telegram echoes our
     // configured secret in this header on every webhook call; anything else
     // (a random bot/scanner hitting the URL) is rejected before we do any work.

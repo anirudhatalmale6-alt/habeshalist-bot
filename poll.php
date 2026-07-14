@@ -29,7 +29,14 @@
  */
 
 // Never allow this to be hit over the web.
-if (php_sapi_name() !== 'cli') {
+//
+// This must run from cron. On this host some cron setups invoke the CGI PHP
+// binary rather than the CLI one, so php_sapi_name() can be 'cgi-fcgi' even
+// though there is no web request at all. The reliable signal for "a real HTTP
+// request" is an HTTP method being present; cron/CLI runs have none. So we
+// treat "no REQUEST_METHOD" as running from the shell regardless of SAPI.
+$fromShell = (php_sapi_name() === 'cli') || empty($_SERVER['REQUEST_METHOD']);
+if (!$fromShell) {
     http_response_code(403);
     exit;
 }
