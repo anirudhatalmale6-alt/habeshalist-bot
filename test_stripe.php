@@ -9,10 +9,12 @@ ini_set('display_errors', 1);
 
 $GLOBALS['__OUT'] = [];
 
-class MockTelegram {
+require __DIR__ . '/includes/telegram.php';
+class MockTelegram extends Telegram {
+    public function __construct() {}
     public function sendMessage($uid, $text, $extra = null) { $GLOBALS['__OUT'][] = ['text'=>$text,'rows'=>[]]; }
     public function sendInlineButtons($uid, $text, $rows) { $GLOBALS['__OUT'][] = ['text'=>$text,'rows'=>$rows]; }
-    public function sendPhoto($uid, $file, $cap = '') { $GLOBALS['__OUT'][] = ['text'=>'[photo]','rows'=>[]]; }
+    public function sendPhoto($uid, $file, $cap = null) { $GLOBALS['__OUT'][] = ['text'=>'[photo]','rows'=>[]]; }
     public function sendMediaGroup($uid, $imgs) { $GLOBALS['__OUT'][] = ['text'=>'[album]','rows'=>[]]; }
     public function callApi($m, $p = []) { return ['ok'=>true,'result'=>[]]; }
 }
@@ -64,27 +66,29 @@ promoHandlePayMethod($UID, 'card', $state);
 check('mentions card being set up', stripos(lastText(),'being set up') !== false);
 check('offers Zelle', hasCb('promopay_zelle'));
 
-echo "\n[2] With key -> creates Checkout Session, shows Pay URL + I've paid\n";
+echo "\n[2] With key -> Secure Card Payment screen with Continue to Payment + Cancel\n";
 $db->setSetting('stripe_key', 'sk_test_dummy');
 reset_out();
 promoHandlePayMethod($UID, 'card', $state);
-check('Pay button carries a checkout URL', strpos(findUrlButton(),'checkout.stripe.com') !== false);
-check('has an I\'ve paid button', hasCb('promo_check_card'));
+check('shows Secure Card Payment title', strpos(lastText(),'Secure Card Payment') !== false);
+check('Continue button carries a checkout URL', strpos(findUrlButton(),'checkout.stripe.com') !== false);
+check('has a Cancel button', hasCb('promo_cancel'));
+check('does NOT put an I\'ve-paid button on this screen', !hasCb('promo_check_card'));
 check('state is promo_awaiting_card', $db->getState($UID)['state'] === 'promo_awaiting_card');
 check('session id stored', ($db->getState($UID)['data']['_stripe_session'] ?? '') === 'cs_test_ABC');
 
-echo "\n[3] I've paid but NOT paid yet -> retry prompt, stays awaiting\n";
+echo "\n[3] Return from checkout but NOT paid yet -> retry prompt, stays awaiting\n";
 $GLOBALS['__paid'] = false;
 reset_out();
-promoCheckCard($UID, $db->getState($UID));
+promoReturnFromCheckout($UID);   // simulates the success deep link firing
 check('says could not confirm', stripos(lastText(),"couldn't confirm") !== false);
 check('still awaiting card', $db->getState($UID)['state'] === 'promo_awaiting_card');
-check('offers retry', hasCb('promo_check_card'));
+check('offers a re-check button', hasCb('promo_check_card'));
 
-echo "\n[4] I've paid AND paid -> confirmed, advances to ad form\n";
+echo "\n[4] Return from checkout AND paid -> confirmed, advances to ad form\n";
 $GLOBALS['__paid'] = true;
 reset_out();
-promoCheckCard($UID, $db->getState($UID));
+promoReturnFromCheckout($UID);
 $st = $db->getState($UID);
 check('advanced to business_name step', $st['state'] === 'promo_business_name');
 check('payment_status = paid', ($st['data']['payment_status'] ?? '') === 'paid');
@@ -107,6 +111,17 @@ promoHandlePayMethod($UID, 'card', ['state'=>'promo_payment','data'=>['package_k
 $st = $db->getState($UID);
 check('advanced to ad form', $st['state'] === 'promo_business_name');
 check('marked paid (no charge)', ($st['data']['payment_status'] ?? '') === 'paid');
+
+echo "\n[7] Cancel deep link -> back to payment options, session cleared\n";
+$GLOBALS['__failCreate'] = false;
+$db->setSetting('stripe_key', 'sk_test_dummy');
+promoHandlePayMethod($UID, 'card', $state);           // re-enter awaiting_card
+check('re-entered awaiting_card', $db->getState($UID)['state'] === 'promo_awaiting_card');
+reset_out();
+promoReturnFromCancel($UID);
+check('shows the payment options screen', strpos(lastText(),'Choose how') !== false || hasCb('promopay_card'));
+check('state back to promo_payment', $db->getState($UID)['state'] === 'promo_payment');
+check('session cleared', empty($db->getState($UID)['data']['_stripe_session']));
 
 echo "\n=====================================\n";
 echo "PASS: $pass   FAIL: $fail\n";

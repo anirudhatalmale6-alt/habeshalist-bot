@@ -938,6 +938,14 @@ function handleAction($userId, $action) {
         case 'contact':
             showContactInfo($userId);
             break;
+        case 'paid':
+            // Return from Stripe checkout (success) - verify & continue.
+            promoReturnFromCheckout($userId);
+            break;
+        case 'paycancel':
+            // Return from Stripe checkout (cancelled) - back to payment options.
+            promoReturnFromCancel($userId);
+            break;
         case 'dashboard':
             if (!$db->getUser($userId)) {
                 startRegistration($userId, 'dashboard');

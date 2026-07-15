@@ -206,12 +206,16 @@ function promoHandlePayMethod($userId, $method, $state) {
         }
 
         $pkg = promoPackage($data['package_key'] ?? '');
-        $site = $config['website_url'] ?? 'https://www.habeshalist.com';
+        // After paying, Stripe sends the user back into THIS Telegram chat via a
+        // deep link, so they land back in the bot conversation (not stranded on
+        // the payment site). The bot then auto-confirms the payment on return.
+        $successUrl = promoReturnLink('paid');
+        $cancelUrl  = promoReturnLink('paycancel');
         $sess = hl_stripe_create_session(
             $key,
             $amountCents,
             ($pkg['name'] ?? 'HabeshaList') . ' promotion',
-            $site, $site,
+            $successUrl, $cancelUrl,
             ['telegram_id' => $userId, 'package_key' => $data['package_key'] ?? '']
         );
 
@@ -233,15 +237,11 @@ function promoHandlePayMethod($userId, $method, $state) {
         $data['_stripe_session'] = $sess['id'];
         $db->setState($userId, 'promo_awaiting_card', $data);
         $tg->sendInlineButtons($userId,
-            "\xF0\x9F\x92\xB3 Tap <b>Pay {$price} by Card</b> to check out securely with Stripe. " .
-            "When you're done, come back here and tap <b>I've paid</b> - I'll confirm it instantly.",
+            "\xF0\x9F\x94\x92 <b>Secure Card Payment</b>\n\n" .
+            "You are about to pay for your promotion. Click the button below to continue to our secure payment page.",
             [
-                [['text' => "\xF0\x9F\x92\xB3 Pay {$price} by Card", 'url' => $sess['url']]],
-                [['text' => "\xE2\x9C\x85 I've paid", 'callback_data' => 'promo_check_card']],
-                [
-                    ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Other methods", 'callback_data' => 'promo_payment_back'],
-                    ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
-                ],
+                [['text' => "Continue to Payment", 'url' => $sess['url']]],
+                [['text' => "Cancel", 'callback_data' => 'promo_cancel']],
             ]
         );
         return;
@@ -296,18 +296,57 @@ function promoCheckCard($userId, $state) {
         return;
     }
 
-    // Not paid yet - let them retry (Stripe can take a moment to settle).
+    // Not paid yet - let them retry (Stripe can take a moment to settle, and if
+    // the user closed the page before paying we let them reopen checkout).
     $db->setState($userId, 'promo_awaiting_card', $data);
+    $rows = [];
+    $rows[] = [['text' => "\xF0\x9F\x94\x84 Check payment status", 'callback_data' => 'promo_check_card']];
+    $rows[] = [
+        ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Other methods", 'callback_data' => 'promo_payment_back'],
+        ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
+    ];
     $tg->sendInlineButtons($userId,
-        "\xF0\x9F\x95\x92 I couldn't confirm your payment yet. If you just completed it, give it a few seconds and tap <b>I've paid</b> again.",
-        [
-            [['text' => "\xE2\x9C\x85 I've paid", 'callback_data' => 'promo_check_card']],
-            [
-                ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Other methods", 'callback_data' => 'promo_payment_back'],
-                ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
-            ],
-        ]
+        "\xF0\x9F\x95\x92 I couldn't confirm your payment yet. If you just completed it, give it a few seconds and tap <b>Check payment status</b>.",
+        $rows
     );
+}
+
+// Build a deep link back into THIS bot's chat carrying a /start payload (used as
+// Stripe's success/cancel return URL so the user lands back in the conversation).
+// Falls back to the website if the bot username can't be determined.
+function promoReturnLink($payload) {
+    global $config;
+    $user = function_exists('getBotUsername') ? getBotUsername() : '';
+    if ($user && $user !== 'bot') {
+        return 'https://t.me/' . $user . '?start=' . rawurlencode($payload);
+    }
+    return $config['website_url'] ?? 'https://www.habeshalist.com';
+}
+
+// User came back into the bot after a Stripe checkout (success deep link). If a
+// card payment is pending, verify and continue; otherwise show the dashboard.
+function promoReturnFromCheckout($userId) {
+    global $db;
+    $state = $db->getState($userId);
+    if (($state['state'] ?? '') === 'promo_awaiting_card' && !empty($state['data']['_stripe_session'])) {
+        promoCheckCard($userId, $state);
+        return;
+    }
+    promoShowDashboard($userId);
+}
+
+// User cancelled on the Stripe page (cancel deep link) - bring them back to the
+// payment options so they can retry or pick another method.
+function promoReturnFromCancel($userId) {
+    global $db;
+    $state = $db->getState($userId);
+    if (($state['state'] ?? '') === 'promo_awaiting_card') {
+        $data = $state['data'];
+        unset($data['_stripe_session']);
+        promoShowPayment($userId, $data);
+        return;
+    }
+    promoShowDashboard($userId);
 }
 
 // Payment is settled (card) - confirm and start the business ad form.
@@ -500,6 +539,11 @@ function promoHandleStateInput($userId, $msg, $state) {
     $st = $state['state'];
     $data = $state['data'];
     $text = trim($msg['text'] ?? '');
+
+    // Returned from the Stripe page without the deep link auto-firing? Any
+    // message while awaiting a card payment triggers a verification, so the user
+    // is never stuck.
+    if ($st === 'promo_awaiting_card') { promoCheckCard($userId, $state); return; }
 
     // ---- Admin: set a setting value (price / payment handle) ----
     if ($st === 'promo_admin_set') {
@@ -1461,7 +1505,7 @@ function promoSchedConfirm($userId, $data) {
 // Reschedule save (from the dashboard "Select Another Slot"): update the
 // existing promotion's schedule and clear future bookings so the engine re-books.
 function promoReschedSave($userId, $state) {
-    global $tg, $db;
+    global $tg, $db, $config;
     $data = $state['data'];
     $promoId = (int) ($data['resched_id'] ?? 0);
     if (!$promoId) { $db->setState($userId, 'idle', []); promoShowDashboard($userId); return; }
@@ -1471,14 +1515,35 @@ function promoReschedSave($userId, $state) {
         'start_date' => $data['start_date'] ?? '',
         'end_date'   => $data['end_date'] ?? '',
     ]);
+    // Drop the old future bookings, then RE-BOOK IMMEDIATELY from the new
+    // schedule so the Upcoming Schedule (and any pinned post) reflect the change
+    // right away, instead of waiting for the next scheduler cron tick. Booking
+    // never touches Telegram, so it's safe to run here. Re-booking respects the
+    // remaining post allowance (already-posted slots are counted), so no
+    // double-booking.
     $db->clearFutureBookings($promoId);
+    promoRebookNow($promoId);
     $db->setState($userId, 'idle', []);
 
     $tg->sendInlineButtons($userId,
         "\xE2\x9C\x85 <b>Schedule updated!</b>\n\n" . promoScheduleSummary($data['schedule']) .
-        "\n\nYour upcoming posts will follow the new schedule.",
+        "\n\nYour upcoming posts have been rescheduled - open View Schedule to see the new times.",
         [[['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']]]
     );
+}
+
+// Book (or re-book) a promotion's future posts from its saved schedule right
+// now, without waiting for the scheduler cron. Used after a dashboard
+// reschedule. Never posts to Telegram - only computes and stores the bookings.
+function promoRebookNow($promoId) {
+    global $tg, $db, $config;
+    try {
+        require_once __DIR__ . '/scheduler.php';
+        $sched = new HL_Scheduler($db->path(), $tg, $config);
+        $sched->bookPromoById((int) $promoId);
+    } catch (Throwable $e) {
+        error_log('promoRebookNow failed for promo ' . $promoId . ': ' . $e->getMessage());
+    }
 }
 
 // ============================================================

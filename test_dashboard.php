@@ -10,10 +10,12 @@ ini_set('display_errors', 1);
 $GLOBALS['__OUT'] = [];
 
 // --- Mock Telegram: capture every outgoing message's text + button data ---
-class MockTelegram {
+require __DIR__ . '/includes/telegram.php';
+class MockTelegram extends Telegram {
+    public function __construct() {}
     public function sendMessage($uid, $text, $extra = null) { $GLOBALS['__OUT'][] = ['uid'=>$uid,'text'=>$text,'rows'=>[]]; }
     public function sendInlineButtons($uid, $text, $rows) { $GLOBALS['__OUT'][] = ['uid'=>$uid,'text'=>$text,'rows'=>$rows]; }
-    public function sendPhoto($uid, $file, $cap = '') { $GLOBALS['__OUT'][] = ['uid'=>$uid,'text'=>'[photo] '.$cap,'rows'=>[]]; }
+    public function sendPhoto($uid, $file, $cap = null) { $GLOBALS['__OUT'][] = ['uid'=>$uid,'text'=>'[photo] '.$cap,'rows'=>[]]; }
     public function sendMediaGroup($uid, $imgs) { $GLOBALS['__OUT'][] = ['uid'=>$uid,'text'=>'[album]','rows'=>[]]; }
     public function callApi($m, $p = []) { return ['ok'=>true,'result'=>[]]; }
 }
@@ -172,6 +174,26 @@ echo "\n[7] User isolation: another user's plan never leaks\n";
 $apOther = promoActivePromotion($OTHER);
 check('other user gets their own plan', $apOther && (int)$apOther['id'] === (int)$otherActive);
 check('active user unaffected', (int)promoActivePromotion($UID)['id'] === (int)$active);
+
+echo "\n[8] Reschedule re-books immediately (Upcoming Schedule updates without cron)\n";
+// Fresh approved monthly plan with a recurring schedule, no bookings yet.
+$resched = $db->createPromotion($UID, [
+    'package_key'=>'monthly','price'=>50,'business_name'=>'Reschedule Cafe','status'=>'approved',
+    'start_date'=>$today,'end_date'=>$later,'posts_total'=>8,'posts_used'=>0,
+]);
+$newSchedule = ['mode'=>'recurring','slots'=>[['dow'=>1,'time'=>'10:15'],['dow'=>4,'time'=>'18:45']]];
+$before = $db->getUpcomingPosts($resched, 50, $today);
+check('no upcoming posts before reschedule', count($before) === 0);
+promoReschedSave($UID, ['state'=>'promo_sched_confirm','data'=>[
+    'resched_id'=>$resched, 'package_key'=>'monthly', 'posts_total'=>8, 'price'=>50,
+    'schedule'=>$newSchedule, 'start_date'=>$today, 'end_date'=>$later,
+]]);
+$after = $db->getUpcomingPosts($resched, 50, $today);
+check('upcoming posts created immediately', count($after) > 0);
+$times = array_map(function($r){ return $r['post_time']; }, $after);
+check('new times reflected (10:15 / 18:45)', in_array('10:15',$times,true) || in_array('18:45',$times,true));
+check('a pinned post is present (monthly first post)', (bool) array_filter($after, function($r){ return (int)$r['pin'] === 1; }));
+check('schedule saved on the promotion', strpos($db->getPromotion($resched)['schedule'] ?? '', '10:15') !== false);
 
 echo "\n=====================================\n";
 echo "PASS: $pass   FAIL: $fail\n";

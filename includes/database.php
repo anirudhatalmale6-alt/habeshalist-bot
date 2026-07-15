@@ -2,15 +2,21 @@
 
 class Database {
     private $db;
+    private $path;
 
     public function __construct($dbPath) {
         $dir = dirname($dbPath);
         if (!is_dir($dir)) @mkdir($dir, 0755, true);
+        $this->path = $dbPath;
         $this->db = new SQLite3($dbPath);
         $this->db->busyTimeout(5000);
         $this->db->exec('PRAGMA journal_mode=WAL');
         $this->init();
     }
+
+    // Path to the underlying SQLite file (so the scheduler can open its own
+    // handle to the same database for an immediate re-book).
+    public function path() { return $this->path; }
 
     private function init() {
         $this->db->exec("
