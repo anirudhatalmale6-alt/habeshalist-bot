@@ -192,24 +192,57 @@ function promoHandlePayMethod($userId, $method, $state) {
             );
             return;
         }
-        // Stripe key present: link generation is wired in the payment milestone.
-        $link = promoStripeLink($data['price'] ?? 0, $data, $userId);
-        if ($link) {
+
+        $amountCents = (int) round(((float) ($data['price'] ?? 0)) * 100);
+        // Stripe's minimum charge is 50 cents. A free/near-zero package skips
+        // payment entirely and goes straight to the ad form.
+        if ($amountCents < 50) {
             $data['payment_method'] = 'card';
-            $db->setState($userId, 'promo_awaiting_payment_proof', $data);
+            $data['payment_status'] = 'paid';
+            $data['receipt'] = 'HL-FREE-' . strtoupper(substr(md5($userId . microtime()), 0, 4));
+            promoCardPaidProceed($userId, $data, "\xE2\x9C\x85 <b>No payment required.</b>");
+            return;
+        }
+
+        $pkg = promoPackage($data['package_key'] ?? '');
+        $site = $config['website_url'] ?? 'https://www.habeshalist.com';
+        $sess = hl_stripe_create_session(
+            $key,
+            $amountCents,
+            ($pkg['name'] ?? 'HabeshaList') . ' promotion',
+            $site, $site,
+            ['telegram_id' => $userId, 'package_key' => $data['package_key'] ?? '']
+        );
+
+        if (empty($sess['url'])) {
+            error_log('promo stripe create session failed: ' . ($sess['error'] ?? 'unknown'));
+            $db->setState($userId, 'promo_payment', $data);
             $tg->sendInlineButtons($userId,
-                "\xF0\x9F\x92\xB3 Tap below to pay <b>{$price}</b> securely by card. " .
-                "Once payment completes you'll be taken through the ad form.",
+                "\xE2\x9A\xA0\xEF\xB8\x8F Sorry, card checkout is temporarily unavailable. Please pay with Zelle or Cash App instead and I'll get you sorted.",
                 [
-                    [['text' => "Pay {$price} by Card", 'url' => $link]],
-                    [['text' => "\xE2\x9C\x85 I've paid", 'callback_data' => 'promo_paid_manual']],
+                    [['text' => "\xF0\x9F\x8F\xA6 Pay with Zelle", 'callback_data' => 'promopay_zelle']],
+                    [['text' => "\xF0\x9F\x92\xB5 Pay with Cash App", 'callback_data' => 'promopay_cashapp']],
                     [['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel']],
                 ]
             );
             return;
         }
-        // Fallback if link couldn't be created
-        promoShowPayment($userId, $data);
+
+        $data['payment_method'] = 'card';
+        $data['_stripe_session'] = $sess['id'];
+        $db->setState($userId, 'promo_awaiting_card', $data);
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x92\xB3 Tap <b>Pay {$price} by Card</b> to check out securely with Stripe. " .
+            "When you're done, come back here and tap <b>I've paid</b> - I'll confirm it instantly.",
+            [
+                [['text' => "\xF0\x9F\x92\xB3 Pay {$price} by Card", 'url' => $sess['url']]],
+                [['text' => "\xE2\x9C\x85 I've paid", 'callback_data' => 'promo_check_card']],
+                [
+                    ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Other methods", 'callback_data' => 'promo_payment_back'],
+                    ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
+                ],
+            ]
+        );
         return;
     }
 
@@ -239,14 +272,51 @@ function promoHandlePayMethod($userId, $method, $state) {
     ]);
 }
 
-// Placeholder for Stripe Checkout link creation - fully wired once the client
-// provides their Stripe secret key (payment milestone). Returns null for now.
-function promoStripeLink($amount, $data, $userId) {
-    global $db, $config;
+// User tapped "I've paid" after a Stripe checkout. Verify OUTBOUND with Stripe
+// (no webhook needed) and, if paid, move straight into the ad form.
+function promoCheckCard($userId, $state) {
+    global $tg, $db, $config;
+
+    $data = $state['data'];
+    $sessionId = $data['_stripe_session'] ?? '';
+    if ($sessionId === '') { promoShowPayment($userId, $data); return; }
+
     $key = $db->getSetting('stripe_key', $config['stripe_key']);
-    if (empty($key)) return null;
-    // Intentionally not implemented until the live key + webhook are in place.
-    return null;
+    $session = hl_stripe_get_session($key, $sessionId);
+
+    if (hl_stripe_session_paid($session)) {
+        $pi = is_array($session) ? (is_string($session['payment_intent'] ?? null) ? $session['payment_intent'] : '') : '';
+        $ref = preg_replace('/[^a-zA-Z0-9]/', '', $pi !== '' ? $pi : $sessionId);
+        $data['payment_method'] = 'card';
+        $data['payment_status'] = 'paid';
+        $data['receipt'] = 'HL-CARD-' . strtoupper(substr($ref, -6));
+        unset($data['_stripe_session']);
+        promoCardPaidProceed($userId, $data, "\xE2\x9C\x85 <b>Payment confirmed!</b>");
+        return;
+    }
+
+    // Not paid yet - let them retry (Stripe can take a moment to settle).
+    $db->setState($userId, 'promo_awaiting_card', $data);
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x95\x92 I couldn't confirm your payment yet. If you just completed it, give it a few seconds and tap <b>I've paid</b> again.",
+        [
+            [['text' => "\xE2\x9C\x85 I've paid", 'callback_data' => 'promo_check_card']],
+            [
+                ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Other methods", 'callback_data' => 'promo_payment_back'],
+                ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'promo_cancel'],
+            ],
+        ]
+    );
+}
+
+// Payment is settled (card) - confirm and start the business ad form.
+function promoCardPaidProceed($userId, $data, $headline) {
+    global $tg, $db;
+    $tg->sendMessage($userId,
+        $headline . "\nReceipt: <b>{$data['receipt']}</b>\n\n" .
+        "Now let's build your promotion. I'll guide you step by step."
+    );
+    promoStartForm($userId, $data);
 }
 
 function promoPaymentProceed($userId, $state, $proofFileId) {

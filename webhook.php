@@ -4,6 +4,7 @@ $config = require __DIR__ . '/config/config.php';
 require_once __DIR__ . '/includes/database.php';
 require_once __DIR__ . '/includes/telegram.php';
 require_once __DIR__ . '/includes/promotion.php';
+require_once __DIR__ . '/includes/stripe.php';   // Stripe Checkout helper (card payments)
 require_once __DIR__ . '/includes/scheduler.php'; // for HL_Scheduler::renderPostText() preview
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
@@ -141,6 +142,7 @@ function handleCallbackQuery($query) {
     if ($data === 'promo_payment_back') { promoShowPayment($userId, $state['data']); return; }
     if (strpos($data, 'promopay_') === 0) { promoHandlePayMethod($userId, substr($data, 9), $state); return; }
     if ($data === 'promo_paid_manual') { promoPaymentProceed($userId, $state, null); return; }
+    if ($data === 'promo_check_card') { promoCheckCard($userId, $state); return; }
     if (strpos($data, 'promocat_') === 0) { promoSelectCategory($userId, (int)substr($data, 9), $state); return; }
     if ($data === 'promo_images_done' || $data === 'promo_images_skip') { promoImagesDone($userId, $state); return; }
     if (strpos($data, 'promoskip_') === 0) { promoSkipField($userId, substr($data, 10), $state); return; }
