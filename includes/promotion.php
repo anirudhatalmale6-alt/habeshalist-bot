@@ -532,6 +532,7 @@ function promoHandleStateInput($userId, $msg, $state) {
     }
 
     if ($isEdit) {
+        promoPersistEditField($data, $field);
         $db->setState($userId, 'promo_review', $data);
         promoShowReview($userId, $data);
     } else {
@@ -561,6 +562,7 @@ function promoHandlePhoto($userId, $msg) {
         $data['logo'] = $photo['file_id'];
         if ($isEdit) {
             unset($data['_last_media_group']);
+            promoPersistEditField($data, 'logo');
             $db->setState($userId, 'promo_review', $data);
             promoShowReview($userId, $data);
         } else {
@@ -623,6 +625,7 @@ function promoSelectCategory($userId, $idx, $state) {
     $data = $state['data'];
     $data['business_category'] = $cat;
     if (promoIsEdit($state)) {
+        promoPersistEditField($data, 'business_category');
         $db->setState($userId, 'promo_review', $data);
         promoShowReview($userId, $data);
     } else {
@@ -635,6 +638,7 @@ function promoSkipField($userId, $field, $state) {
     $data = $state['data'];
     $data[$field] = ($field === 'images') ? [] : '';
     if (promoIsEdit($state)) {
+        promoPersistEditField($data, $field);
         $db->setState($userId, 'promo_review', $data);
         promoShowReview($userId, $data);
     } else {
@@ -660,6 +664,7 @@ function promoImagesDone($userId, $state) {
     $data = $state['data'];
     unset($data['_last_media_group'], $data['_img_max_notified']);
     if (promoIsEdit($state)) {
+        promoPersistEditField($data, 'images');
         $db->setState($userId, 'promo_review', $data);
         promoShowReview($userId, $data);
     } else {
@@ -701,6 +706,26 @@ function promoSummaryText($data, $forAdmin = false) {
 function promoShowReview($userId, $data) {
     global $tg, $db;
     $db->setState($userId, 'promo_review', $data);
+
+    // Editing an already-saved ad: changes are persisted as they're made, so we
+    // just offer Edit-more / Preview / Done (back to dashboard) - no re-submit
+    // or re-scheduling, which would duplicate the promotion.
+    if (!empty($data['_edit_promo_id'])) {
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x93\x8B <b>Your Ad</b>\n\n" .
+            promoSummaryText($data, false) . "\n\n" .
+            "Your changes are saved automatically. Edit another field, preview it, or tap Done.",
+            [
+                [
+                    ['text' => "\xF0\x9F\x91\x81 Preview Ad", 'callback_data' => 'promo_preview'],
+                    ['text' => "\xE2\x9C\x8F\xEF\xB8\x8F Edit", 'callback_data' => 'promo_edit'],
+                ],
+                [['text' => "\xE2\x9C\x85 Done", 'callback_data' => 'promo_dashboard']],
+            ]
+        );
+        return;
+    }
+
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\x93\x8B <b>Review Your Promotion</b>\n\n" .
         promoSummaryText($data, false) . "\n\n" .
@@ -715,9 +740,24 @@ function promoShowReview($userId, $data) {
     );
 }
 
+// If the edit data has been lost (e.g. the user tapped an old Edit button after
+// the flow was reset), recover it from their current saved promotion so the
+// form is never blank. Returns the data array to use, or null if nothing to edit.
+function promoRecoverEditData($userId, $state) {
+    $data = $state['data'] ?? [];
+    // A live build/edit has the business name in memory - use it as-is.
+    if (!empty($data['business_name'])) return $data;
+    // Otherwise pull the current active plan back into the form.
+    $promo = promoActivePromotion($userId);
+    if (!$promo) return null;
+    return promoLoadPromoIntoData($promo);
+}
+
 function promoEditMenu($userId, $state) {
     global $tg, $db;
-    $db->setState($userId, 'promo_review', $state['data']);
+    $data = promoRecoverEditData($userId, $state);
+    if ($data === null) { promoShowDashboard($userId); return; }
+    $db->setState($userId, 'promo_review', $data);
     $tg->sendInlineButtons($userId,
         "\xE2\x9C\x8F\xEF\xB8\x8F <b>What would you like to edit?</b>",
         [
@@ -750,7 +790,8 @@ function promoEditMenu($userId, $state) {
 function promoEditField($userId, $field, $state) {
     global $db;
     if (!in_array($field, promoFormOrder(), true)) return;
-    $data = $state['data'];
+    $data = promoRecoverEditData($userId, $state);
+    if ($data === null) { promoShowDashboard($userId); return; }
     $db->setState($userId, 'promo_edit_' . $field, $data);
     promoPromptStep($userId, $field, $data, true);
 }
@@ -767,6 +808,20 @@ function promoSubmit($userId, $state) {
     global $tg, $db;
 
     $data = $state['data'];
+
+    // Editing a saved ad already persists changes - never create a duplicate.
+    if (!empty($data['_edit_promo_id'])) { promoShowDashboard($userId); return; }
+    // Guard against a stale/blank Submit tap after the flow was reset.
+    if (empty($data['business_name'])) {
+        $tg->sendInlineButtons($userId,
+            "That promotion is no longer in progress. Tap below to start a new one or view your dashboard.",
+            [
+                [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
+                [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
+            ]);
+        return;
+    }
+
     $user = $db->getUser($userId);
     $data['status'] = 'pending_review';
     if (empty($data['payment_status'])) $data['payment_status'] = 'pending';
@@ -1021,6 +1076,21 @@ function promoShowPreview($userId, $data) {
         $tg->sendMessage($userId, $text);
     } else {
         $tg->sendMessage($userId, $text);
+    }
+
+    // Editing a saved ad: no scheduling here (times are managed from the
+    // dashboard's "Select Another Slot"), just edit/preview and go back.
+    if (!empty($data['_edit_promo_id'])) {
+        $tg->sendInlineButtons($userId,
+            "This is your updated ad. Edit another field or go back.",
+            [
+                [
+                    ['text' => "\xE2\x9C\x8F\xEF\xB8\x8F Edit Ad", 'callback_data' => 'promo_edit'],
+                    ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'promo_back_review'],
+                ],
+            ]
+        );
+        return;
     }
 
     $tg->sendInlineButtons($userId,
@@ -1344,13 +1414,82 @@ function promoReschedSave($userId, $state) {
 // USER DASHBOARD
 // ============================================================
 
+// Today's date (Y-m-d) in the schedule timezone - the reference point for
+// "future" posts and plan expiry across the whole dashboard.
+function promoToday() {
+    return (new DateTime('now', promoSchedTz()))->format('Y-m-d');
+}
+
+// A plan is expired once its end_date is in the past (schedule timezone).
+function promoIsExpired($promo, $today = null) {
+    $end = substr($promo['end_date'] ?? '', 0, 10);
+    if ($end === '') return false;              // open-ended / single-post plans never "expire" by date
+    $today = $today ?: promoToday();
+    return $end < $today;
+}
+
+// The user's ONE current active plan for the dashboard.
+// Active = approved AND not expired. If there's no running plan we fall back to
+// a plan still awaiting review (so the user can see its pending status), but we
+// NEVER surface cancelled, rejected, expired or draft plans here.
 function promoActivePromotion($userId) {
     global $db;
     $all = $db->getUserPromotions($userId);
-    // Prefer an approved (running) promotion, else the most recent non-cancelled.
-    foreach ($all as $p) { if (($p['status'] ?? '') === 'approved') return $p; }
-    foreach ($all as $p) { if (in_array(($p['status'] ?? ''), ['pending_review'], true)) return $p; }
-    return $all[0] ?? null;
+    $today = promoToday();
+
+    // Prefer a live, approved, not-yet-expired plan (most recent first - the
+    // list is already ordered created_at DESC).
+    foreach ($all as $p) {
+        if (($p['status'] ?? '') === 'approved' && !promoIsExpired($p, $today)) return $p;
+    }
+    // Otherwise a plan still pending review is worth showing.
+    foreach ($all as $p) {
+        if (($p['status'] ?? '') === 'pending_review') return $p;
+    }
+    // Nothing active - deliberately do NOT fall back to cancelled/rejected/
+    // expired/draft records.
+    return null;
+}
+
+// Map a stored promotion row into the in-memory "data" array the ad-builder /
+// edit flow works with. Tags it with _edit_promo_id so saves update this record
+// instead of creating a brand-new promotion.
+function promoLoadPromoIntoData($promo) {
+    $images = [];
+    if (!empty($promo['images'])) {
+        $decoded = json_decode($promo['images'], true);
+        if (is_array($decoded)) $images = $decoded;
+    }
+    return [
+        '_edit_promo_id'    => (int) $promo['id'],
+        'package_key'       => $promo['package_key'] ?? '',
+        'price'             => $promo['price'] ?? 0,
+        'payment_method'    => $promo['payment_method'] ?? '',
+        'payment_status'    => $promo['payment_status'] ?? '',
+        'receipt'           => $promo['receipt'] ?? '',
+        'business_name'     => $promo['business_name'] ?? '',
+        'business_category' => $promo['business_category'] ?? '',
+        'description'       => $promo['description'] ?? '',
+        'phone'             => $promo['phone'] ?? '',
+        'website'           => $promo['website'] ?? '',
+        'social'            => $promo['social'] ?? '',
+        'address'           => $promo['address'] ?? '',
+        'hours'             => $promo['hours'] ?? '',
+        'logo'              => $promo['logo'] ?? '',
+        'images'            => $images,
+        'cta'               => $promo['cta'] ?? '',
+        'posts_total'       => (int) ($promo['posts_total'] ?? 0),
+    ];
+}
+
+// When an edit is happening on an already-saved ad, persist the single changed
+// field straight to the DB so it survives even if the user walks away.
+function promoPersistEditField($data, $field) {
+    global $db;
+    $id = (int) ($data['_edit_promo_id'] ?? 0);
+    if ($id <= 0) return;
+    if (!in_array($field, promoFormOrder(), true)) return;
+    $db->updatePromotion($id, [$field => $data[$field] ?? '']);
 }
 
 function promoStatusLabel($status) {
@@ -1403,7 +1542,7 @@ function promoShowDashboard($userId) {
     $lines[] = '';
     $lines[] = "\xF0\x9F\x93\x9D Remaining posts: <b>{$remaining} / {$total}</b>";
 
-    $next = $db->getNextPost($pid);
+    $next = $db->getNextPost($pid, promoToday());
     if ($next) {
         $nd = DateTime::createFromFormat('Y-m-d', $next['post_date'], $tz);
         $nt = !empty($next['post_time']) ? $next['post_time'] : '';
@@ -1425,7 +1564,10 @@ function promoShowDashboard($userId) {
         ['text' => "\xF0\x9F\x93\x86 View Schedule", 'callback_data' => "dash_sched_{$pid}"],
         ['text' => "\xF0\x9F\x93\x91 My Ads", 'callback_data' => 'dash_ads'],
     ];
-    $rows[] = [['text' => "\xF0\x9F\x92\xB3 Payment History", 'callback_data' => 'dash_pay']];
+    $rows[] = [
+        ['text' => "\xF0\x9F\x92\xB3 Payment", 'callback_data' => 'dash_pay'],
+        ['text' => "\xE2\x9C\x8F\xEF\xB8\x8F Edit Ad", 'callback_data' => "dash_edit_{$pid}"],
+    ];
     if (($promo['status'] ?? '') === 'approved') {
         $rows[] = [
             ['text' => "\xF0\x9F\x93\x85 Select Another Slot", 'callback_data' => "dash_slot_{$pid}"],
@@ -1442,7 +1584,7 @@ function promoDashViewSchedule($userId, $promoId) {
     $promo = $db->getPromotion($promoId);
     if (!$promo || $promo['telegram_id'] != $userId) { promoShowDashboard($userId); return; }
     $tz = promoSchedTz();
-    $rows = $db->getUpcomingPosts($promoId, 20);
+    $rows = $db->getUpcomingPosts($promoId, 20, promoToday());
 
     $txt = "\xF0\x9F\x93\x86 <b>Upcoming Schedule - " . ($promo['business_name'] ?: 'Your promotion') . "</b>\n\n";
     if (empty($rows)) {
@@ -1463,36 +1605,67 @@ function promoDashViewSchedule($userId, $promoId) {
 
 function promoDashMyAds($userId) {
     global $tg, $db;
-    $all = $db->getUserPromotions($userId);
-    $txt = "\xF0\x9F\x93\x91 <b>My Promotions</b>\n\n";
-    if (empty($all)) {
-        $txt .= "You haven't created any promotions yet.";
+    // Only ever show the ad for the current active plan - never expired,
+    // cancelled, rejected or draft records.
+    $promo = promoActivePromotion($userId);
+    $txt = "\xF0\x9F\x93\x91 <b>My Ad</b>\n\n";
+    if (!$promo) {
+        $txt .= "You don't have an active promotion right now.";
     } else {
-        foreach ($all as $p) {
-            $pkg = promoPackage($p['package_key'] ?? '');
-            $txt .= "\xF0\x9F\x8F\xA2 <b>" . ($p['business_name'] ?: 'Untitled') . "</b>\n";
-            $txt .= "   " . ($pkg['name'] ?? $p['package_key']) . " - " . promoStatusLabel($p['status'] ?? '') .
-                " (" . (int) ($p['posts_used'] ?? 0) . "/" . (int) ($p['posts_total'] ?? 0) . " posts)\n";
-        }
+        $pkg = promoPackage($promo['package_key'] ?? '');
+        $txt .= "\xF0\x9F\x8F\xA2 <b>" . ($promo['business_name'] ?: 'Untitled') . "</b>\n";
+        $txt .= "   " . ($pkg['name'] ?? $promo['package_key']) . " - " . promoStatusLabel($promo['status'] ?? '') .
+            " (" . (int) ($promo['posts_used'] ?? 0) . "/" . (int) ($promo['posts_total'] ?? 0) . " posts)\n";
+        if (!empty($promo['business_category'])) $txt .= "   " . $promo['business_category'] . "\n";
     }
-    $tg->sendInlineButtons($userId, $txt, [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Dashboard", 'callback_data' => 'promo_dashboard']]]);
+    $rows = [];
+    if ($promo) $rows[] = [['text' => "\xE2\x9C\x8F\xEF\xB8\x8F Edit Ad", 'callback_data' => "dash_edit_" . (int) $promo['id']]];
+    $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Dashboard", 'callback_data' => 'promo_dashboard']];
+    $tg->sendInlineButtons($userId, $txt, $rows);
 }
 
 function promoDashPayments($userId) {
     global $tg, $db;
-    $all = $db->getUserPromotions($userId);
-    $txt = "\xF0\x9F\x92\xB3 <b>Payment History</b>\n\n";
-    $any = false;
-    foreach ($all as $p) {
-        if (empty($p['receipt']) && empty($p['payment_method'])) continue;
-        $any = true;
-        $pkg = promoPackage($p['package_key'] ?? '');
-        $txt .= "\xF0\x9F\xA7\xBE " . ($p['receipt'] ?: '-') . "\n";
-        $txt .= "   " . ($pkg['name'] ?? $p['package_key']) . " - " . promoFmtPrice($p['price'] ?? 0) . "\n";
-        $txt .= "   " . strtoupper($p['payment_method'] ?: 'n/a') . " - " . ($p['payment_status'] ?: 'pending') . "\n\n";
+    // Show only the most recent payment for the current active plan.
+    $promo = promoActivePromotion($userId);
+    $txt = "\xF0\x9F\x92\xB3 <b>Payment</b>\n\n";
+    if (!$promo || (empty($promo['receipt']) && empty($promo['payment_method']) && empty($promo['price']))) {
+        $txt .= "No payment on record for your current plan yet.";
+    } else {
+        $pkg = promoPackage($promo['package_key'] ?? '');
+        $tz = promoSchedTz();
+        $paidAt = '';
+        if (!empty($promo['created_at'])) {
+            // created_at is stored UTC; show it in the schedule timezone.
+            $dt = DateTime::createFromFormat('Y-m-d H:i:s', substr($promo['created_at'], 0, 19), new DateTimeZone('UTC'));
+            if ($dt) { $dt->setTimezone($tz); $paidAt = $dt->format('M j, Y'); }
+        }
+        $txt .= "\xF0\x9F\x93\xA6 Plan: <b>" . ($pkg['name'] ?? $promo['package_key']) . "</b>\n";
+        $txt .= "\xF0\x9F\x92\xB5 Amount: <b>" . promoFmtPrice($promo['price'] ?? 0) . "</b>\n";
+        if ($paidAt !== '') $txt .= "\xF0\x9F\x93\x85 Date: <b>{$paidAt}</b>\n";
+        $txt .= "\xF0\x9F\x92\xB3 Method: <b>" . ($promo['payment_method'] ? strtoupper($promo['payment_method']) : 'n/a') . "</b>\n";
+        $txt .= "\xF0\x9F\x93\x8C Status: <b>" . ($promo['payment_status'] ?: 'pending') . "</b>\n";
+        if (!empty($promo['receipt'])) $txt .= "\xF0\x9F\xA7\xBE Receipt: <b>" . $promo['receipt'] . "</b>\n";
     }
-    if (!$any) $txt .= "No payments on record yet.";
     $tg->sendInlineButtons($userId, $txt, [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Dashboard", 'callback_data' => 'promo_dashboard']]]);
+}
+
+// Entry from the dashboard "Edit Ad" button: load the SAVED ad back into the
+// edit flow so its fields are pre-filled, and tag it so each change is written
+// straight back to this promotion (no duplicate record).
+function promoDashEditAd($userId, $promoId) {
+    global $tg, $db;
+    $promo = $db->getPromotion($promoId);
+    if (!$promo || $promo['telegram_id'] != $userId) { promoShowDashboard($userId); return; }
+    if (in_array(($promo['status'] ?? ''), ['canceled', 'rejected'], true)) {
+        $tg->sendInlineButtons($userId,
+            "This plan is no longer active, so it can't be edited.",
+            [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Dashboard", 'callback_data' => 'promo_dashboard']]]);
+        return;
+    }
+    $data = promoLoadPromoIntoData($promo);
+    $db->setState($userId, 'promo_review', $data);
+    promoEditMenu($userId, ['state' => 'promo_review', 'data' => $data]);
 }
 
 function promoDashSelectSlot($userId, $promoId) {

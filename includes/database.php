@@ -294,24 +294,33 @@ class Database {
     // ---- Scheduled posts (read for the user dashboard) ----
 
     // Upcoming (not-yet-posted) bookings for a promotion, earliest first.
-    public function getUpcomingPosts($promoId, $limit = 20) {
+    // Pass $today (Y-m-d, in the schedule timezone) to exclude any stale
+    // bookings whose date is already in the past - the dashboard must only ever
+    // show FUTURE scheduled posts.
+    public function getUpcomingPosts($promoId, $limit = 20, $today = null) {
+        $dateFloor = $today ? " AND post_date >= :today" : '';
         $stmt = $this->db->prepare("SELECT * FROM scheduled_posts
-            WHERE promotion_id = :p AND status = 'scheduled'
+            WHERE promotion_id = :p AND status = 'scheduled'{$dateFloor}
             ORDER BY post_date ASC, COALESCE(post_time,'') ASC, id ASC LIMIT :l");
         $stmt->bindValue(':p', $promoId, SQLITE3_INTEGER);
         $stmt->bindValue(':l', $limit, SQLITE3_INTEGER);
+        if ($today) $stmt->bindValue(':today', $today, SQLITE3_TEXT);
         $res = $stmt->execute();
         $rows = [];
         while ($row = $res->fetchArray(SQLITE3_ASSOC)) { $rows[] = $row; }
         return $rows;
     }
 
-    // The single next post that will go out for a promotion.
-    public function getNextPost($promoId) {
+    // The single next post that will go out for a promotion. Pass $today to
+    // guarantee we return the next FUTURE post, never an old past date left
+    // behind by a previous plan.
+    public function getNextPost($promoId, $today = null) {
+        $dateFloor = $today ? " AND post_date >= :today" : '';
         $stmt = $this->db->prepare("SELECT * FROM scheduled_posts
-            WHERE promotion_id = :p AND status = 'scheduled'
+            WHERE promotion_id = :p AND status = 'scheduled'{$dateFloor}
             ORDER BY post_date ASC, COALESCE(post_time,'') ASC, id ASC LIMIT 1");
         $stmt->bindValue(':p', $promoId, SQLITE3_INTEGER);
+        if ($today) $stmt->bindValue(':today', $today, SQLITE3_TEXT);
         return $stmt->execute()->fetchArray(SQLITE3_ASSOC) ?: null;
     }
 

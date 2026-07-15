@@ -187,6 +187,7 @@ function handleCallbackQuery($query) {
     if (strpos($data, 'dash_sched_') === 0) { promoDashViewSchedule($userId, (int) substr($data, 11)); return; }
     if ($data === 'dash_ads') { promoDashMyAds($userId); return; }
     if ($data === 'dash_pay') { promoDashPayments($userId); return; }
+    if (strpos($data, 'dash_edit_') === 0) { promoDashEditAd($userId, (int) substr($data, 10)); return; }
     if (strpos($data, 'dash_slot_') === 0) { promoDashSelectSlot($userId, (int) substr($data, 10)); return; }
     if (strpos($data, 'dash_cancelyes_') === 0) { promoDashDoCancel($userId, (int) substr($data, 15)); return; }
     if (strpos($data, 'dash_cancel_') === 0) { promoDashCancelConfirm($userId, (int) substr($data, 12)); return; }
