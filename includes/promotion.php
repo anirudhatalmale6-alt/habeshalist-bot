@@ -179,7 +179,8 @@ function promoHandlePayMethod($userId, $method, $state) {
 
     if ($method === 'card') {
         $key = $db->getSetting('stripe_key', $config['stripe_key']);
-        if (empty($key)) {
+        // No key, or the Stripe helper file isn't present yet -> manual fallback.
+        if (empty($key) || !function_exists('hl_stripe_create_session')) {
             $db->setState($userId, 'promo_payment', $data);
             $tg->sendInlineButtons($userId,
                 "\xF0\x9F\x92\xB3 <b>Card payments are being set up.</b>\n\n" .

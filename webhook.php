@@ -4,7 +4,10 @@ $config = require __DIR__ . '/config/config.php';
 require_once __DIR__ . '/includes/database.php';
 require_once __DIR__ . '/includes/telegram.php';
 require_once __DIR__ . '/includes/promotion.php';
-require_once __DIR__ . '/includes/stripe.php';   // Stripe Checkout helper (card payments)
+// Stripe helper is optional-at-load: if this file hasn't been uploaded yet the
+// bot must still run (card checkout simply falls back to manual payment) rather
+// than crash the whole poller on a missing include.
+if (is_file(__DIR__ . '/includes/stripe.php')) require_once __DIR__ . '/includes/stripe.php';
 require_once __DIR__ . '/includes/scheduler.php'; // for HL_Scheduler::renderPostText() preview
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
