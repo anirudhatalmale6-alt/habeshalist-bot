@@ -1011,6 +1011,11 @@ function promoModerate($adminId, $promoId, $decision) {
 
     if ($decision === 'approve') {
         $db->updatePromotion($promoId, ['status' => 'approved', 'payment_status' => 'verified']);
+        // Book the schedule right away so the user's dashboard (Next post /
+        // Upcoming Schedule) fills in immediately, instead of waiting for the
+        // next scheduler tick. Booking never posts to Telegram - only the
+        // scheduler's postDue() does - so this is safe to run inline.
+        promoRebookNow($promoId);
         $tg->sendMessage($adminId, "\xE2\x9C\x85 Approved: <b>{$bname}</b>.");
         $tg->sendInlineButtons($posterTid,
             "\xF0\x9F\x8E\x89 <b>Great news!</b> Your promotion for <b>{$bname}</b> has been approved.\n\n" .
@@ -1242,29 +1247,91 @@ function promoSchedStart($userId, $state) {
 
 // ---- Single date grid (one-time & Business of the Week) ----
 
-function promoDateGrid($userId, $data) {
+// Inline month-calendar date picker (like a booking app), replacing the old
+// flat list of dates. $ym (optional 'YYYYMM') selects the month to render, for
+// the ◀/▶ navigation; it defaults to the month containing today. Only dates
+// inside the bookable window [today .. today+N] are tappable; everything else is
+// shown greyed as a no-op, and the arrows only appear when there's a reachable
+// month in that direction.
+function promoDateGrid($userId, $data, $ym = null) {
     global $tg;
     $key = $data['package_key'] ?? 'one_time';
     $tz = promoSchedTz();
-    $today = new DateTime('now', $tz);
-    $today->setTime(0, 0);
+    $today = new DateTime('now', $tz); $today->setTime(0, 0);
 
     $days = ($key === 'botw') ? 28 : 30;   // botw is bookable up to 4 weeks out
-    $rows = [];
-    $row = [];
-    for ($i = 0; $i < $days; $i++) {
-        $d = (clone $today)->modify("+{$i} day");
-        $label = $d->format('D M j');
-        $row[] = ['text' => $label, 'callback_data' => 'pschd_' . $d->format('Ymd')];
-        if (count($row) === 2) { $rows[] = $row; $row = []; }
+    $maxDate = (clone $today)->modify('+' . ($days - 1) . ' day');
+
+    // Month being shown. Clamp so we never render a month with no bookable day.
+    $month = null;
+    if ($ym && preg_match('/^(\d{4})(\d{2})$/', $ym, $m)) {
+        $month = DateTime::createFromFormat('Y-m-d', "{$m[1]}-{$m[2]}-01", $tz);
     }
-    if (!empty($row)) $rows[] = $row;
+    if (!($month instanceof DateTime)) { $month = (clone $today); }
+    $month->setTime(0, 0); $month->modify('first day of this month');
+
+    $firstOfMonth = (clone $month);
+    $daysInMonth  = (int) $month->format('t');
+    $lastOfMonth  = (clone $month)->modify('last day of this month');
+
+    // Leading blanks so day 1 lands under the right weekday (Mon-first grid).
+    $leadBlanks = ((int) $firstOfMonth->format('N')) - 1;   // Mon=1..Sun=7
+
+    $isTappable = function (DateTime $d) use ($today, $maxDate) {
+        return $d >= $today && $d <= $maxDate;
+    };
+
+    $rows = [];
+    // Header: ◀  Month Year  ▶
+    $prevMonthLast = (clone $firstOfMonth)->modify('-1 day');            // last day of prev month
+    $nextMonthFirst = (clone $lastOfMonth)->modify('+1 day');           // first day of next month
+    $hasPrev = ($prevMonthLast >= $today);                              // prev month still has bookable days
+    $hasNext = ($nextMonthFirst <= $maxDate);                           // next month has bookable days
+    $header = [];
+    $header[] = $hasPrev
+        ? ['text' => "\xE2\x97\x80", 'callback_data' => 'pcaln_' . $prevMonthLast->format('Ym')]
+        : ['text' => "\xC2\xA0", 'callback_data' => 'pnop'];
+    $header[] = ['text' => $month->format('F Y'), 'callback_data' => 'pnop'];
+    $header[] = $hasNext
+        ? ['text' => "\xE2\x96\xB6", 'callback_data' => 'pcaln_' . $nextMonthFirst->format('Ym')]
+        : ['text' => "\xC2\xA0", 'callback_data' => 'pnop'];
+    $rows[] = $header;
+
+    // Weekday header (Mon-first).
+    $rows[] = array_map(function ($w) { return ['text' => $w, 'callback_data' => 'pnop']; },
+        ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']);
+
+    // Day cells.
+    $row = [];
+    for ($i = 0; $i < $leadBlanks; $i++) { $row[] = ['text' => "\xC2\xA0", 'callback_data' => 'pnop']; }
+    for ($day = 1; $day <= $daysInMonth; $day++) {
+        $d = DateTime::createFromFormat('Y-m-d', $month->format('Y-m-') . sprintf('%02d', $day), $tz);
+        $d->setTime(0, 0);
+        if ($isTappable($d)) {
+            $row[] = ['text' => (string) $day, 'callback_data' => 'pschd_' . $d->format('Ymd')];
+        } else {
+            $row[] = ['text' => "\xC2\xB7", 'callback_data' => 'pnop'];   // middot = not selectable
+        }
+        if (count($row) === 7) { $rows[] = $row; $row = []; }
+    }
+    if (!empty($row)) {
+        while (count($row) < 7) { $row[] = ['text' => "\xC2\xA0", 'callback_data' => 'pnop']; }
+        $rows[] = $row;
+    }
+
     $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'promo_preview']];
 
     $note = ($key === 'botw')
         ? "Pick the day your Business of the Week feature should start. It stays pinned for the full 7 days."
-        : "Pick the date you'd like your post to go out:";
+        : "Tap the date you'd like your post to go out:";
     $tg->sendInlineButtons($userId, "\xF0\x9F\x93\x85 <b>Choose a date</b>\n\n" . $note, $rows);
+}
+
+// ◀/▶ month navigation on the calendar. Re-renders the picker for the chosen
+// month, reusing the current scheduling session's data (so the bookable window
+// for the package is preserved).
+function promoCalendarNav($userId, $ym, $state) {
+    promoDateGrid($userId, $state['data'] ?? [], $ym);
 }
 
 function promoSchedPickDate($userId, $ymd, $state) {
@@ -1659,7 +1726,10 @@ function promoShowDashboard($userId) {
     $pkg = promoPackage($promo['package_key'] ?? '');
     $planName = $pkg['name'] ?? 'Promotion';
     $total = (int) ($promo['posts_total'] ?: ($pkg['posts_total'] ?? 1));
-    $used = (int) ($promo['posts_used'] ?? 0);
+    // "Used" counts posts already committed (scheduled + published), so a booked
+    // post immediately reduces the remaining allowance. Fall back to posts_used
+    // for any legacy plan that has no scheduled_posts rows.
+    $used = max($db->countCommittedPosts($pid), (int) ($promo['posts_used'] ?? 0));
     $remaining = max(0, $total - $used);
     $tz = promoSchedTz();
 
@@ -1749,9 +1819,13 @@ function promoDashMyAds($userId) {
         $txt .= "You don't have an active promotion right now.";
     } else {
         $pkg = promoPackage($promo['package_key'] ?? '');
+        // Use the same committed-posts count as the dashboard so the two views
+        // always agree (e.g. a scheduled one-time post reads 1/1, not 0/1).
+        $usedAds = max($db->countCommittedPosts((int) $promo['id']), (int) ($promo['posts_used'] ?? 0));
+        $totalAds = (int) ($promo['posts_total'] ?? 0);
         $txt .= "\xF0\x9F\x8F\xA2 <b>" . ($promo['business_name'] ?: 'Untitled') . "</b>\n";
         $txt .= "   " . ($pkg['name'] ?? $promo['package_key']) . " - " . promoStatusLabel($promo['status'] ?? '') .
-            " (" . (int) ($promo['posts_used'] ?? 0) . "/" . (int) ($promo['posts_total'] ?? 0) . " posts)\n";
+            " ({$usedAds}/{$totalAds} posts)\n";
         if (!empty($promo['business_category'])) $txt .= "   " . $promo['business_category'] . "\n";
     }
     $rows = [];

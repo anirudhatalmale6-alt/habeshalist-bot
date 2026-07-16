@@ -68,6 +68,23 @@ $token   = $config['bot_token'];
 $apiBase = 'https://api.telegram.org/bot' . $token . '/';
 $offset  = (int) @file_get_contents($offsetPath);
 
+// ---- scheduler tick ----
+// Run the scheduling + auto-posting engine once at the start of every poll run.
+// The poll cron fires every minute, so this gives the scheduler near-continuous,
+// per-minute coverage WITHOUT relying on a second cron job (this host has a
+// history of the standalone scheduler cron being missing or misconfigured).
+// Newly-approved promotions get booked here and any post whose time has arrived
+// is published here. We already hold the single-instance lock, so two runs can
+// never post the same booking twice. Wrapped so a scheduler hiccup can never
+// bring the poller down.
+try {
+    require_once __DIR__ . '/includes/scheduler.php';
+    $sched = new HL_Scheduler(__DIR__ . '/data/bot.sqlite', $tg, $config);
+    $sched->run();
+} catch (Throwable $e) {
+    error_log('poll.php scheduler tick failed: ' . $e->getMessage());
+}
+
 $deadline = time() + $MAX_RUN_SECONDS;
 
 while (time() < $deadline) {

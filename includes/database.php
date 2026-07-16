@@ -330,6 +330,19 @@ class Database {
         return $stmt->execute()->fetchArray(SQLITE3_ASSOC) ?: null;
     }
 
+    // How many posts are already committed for a promotion - counting both those
+    // still scheduled AND those already published. This is what the dashboard
+    // uses for "posts used / remaining", so a post counts against the allowance
+    // the moment it's scheduled (not only once it goes live). Keeps the "Remaining
+    // posts" figure and the "My Ads" used/total figure consistent.
+    public function countCommittedPosts($promoId) {
+        $stmt = $this->db->prepare("SELECT COUNT(*) c FROM scheduled_posts
+            WHERE promotion_id = :p AND status IN ('scheduled','posted')");
+        $stmt->bindValue(':p', $promoId, SQLITE3_INTEGER);
+        $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+        return (int) ($row['c'] ?? 0);
+    }
+
     // A currently-pinned post for a promotion (pin still within its window), if any.
     public function getActivePin($promoId) {
         $nowUtc = gmdate('Y-m-d H:i:s');

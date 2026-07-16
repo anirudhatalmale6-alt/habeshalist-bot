@@ -166,6 +166,8 @@ function handleCallbackQuery($query) {
 
     if ($data === 'promo_preview') { promoShowPreview($userId, $state['data']); return; }
     if ($data === 'promo_sched_start') { promoSchedStart($userId, $state); return; }
+    if ($data === 'pnop') { return; }   // calendar filler / disabled cell (already ack'd)
+    if (strpos($data, 'pcaln_') === 0) { promoCalendarNav($userId, substr($data, 6), $state); return; }
     if (strpos($data, 'pschd_') === 0) { promoSchedPickDate($userId, substr($data, 6), $state); return; }
     if (strpos($data, 'pschrt_') === 0) {
         $rest = substr($data, 7);                 // "<slot>_<hhmm|custom>"
