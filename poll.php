@@ -15,12 +15,24 @@
  * as the webhook, so behaviour is identical.
  *
  * HOW IT RUNS
- * Run once per minute from cron:
+ * Run from cron:
  *   * * * * * /usr/local/bin/php /home/USER/public_html/bot/poll.php >/dev/null 2>&1
- * Each run holds a long-poll connection for up to ~55s (so a 1-minute cron
- * gives near-continuous coverage) and then exits. A file lock guarantees only
- * one poller runs at a time, so overlapping cron ticks never double-poll
- * (which would cause Telegram 409 Conflict).
+ *
+ * IMPORTANT - this must NOT depend on the cron firing every minute. Some shared
+ * hosts (Bluehost included) silently enforce a MINIMUM cron interval (commonly
+ * ~15 minutes) and quietly rewrite an every-minute cron into an every-16-minute
+ * one. If a run only lived ~55s, the bot would then be dead for ~15 min and
+ * appear frozen. So instead each run STAYS ALIVE for the whole interval: it
+ * long-polls continuously and ticks the scheduler every 60s from inside the
+ * loop. The cron is now just a watchdog that restarts the poller if it ever
+ * died. A file lock guarantees only one poller runs at a time, so a fresh cron
+ * tick that arrives while a run is still alive simply exits (no 409, no
+ * double-poll, no double-posting).
+ *
+ * The run length is $MAX_RUN_SECONDS below (override with the 'poll_run_seconds'
+ * setting). It is deliberately a little SHORTER than the host's cron interval so
+ * each run hands off cleanly to the next tick with only a few seconds' gap,
+ * whatever interval the host allows (every minute, or every ~15 min).
  *
  * SWITCHING MODES
  * Polling and webhook are mutually exclusive. To use polling the webhook must
@@ -46,8 +58,13 @@ if (!$fromShell) {
 require __DIR__ . '/webhook.php';
 
 // ---- tunables ----
-$MAX_RUN_SECONDS = 55;   // stay just under a 1-minute cron cadence
-$LONG_POLL       = 50;   // how long each getUpdates call waits for new updates
+// Stay alive for close to a full host-cron interval so the bot never goes quiet
+// between ticks even if the host forces a ~15-minute cron. Kept a touch under
+// the interval so each run exits just before the next tick (clean hand-off).
+// Overridable via the 'poll_run_seconds' setting if a host needs a shorter run.
+$MAX_RUN_SECONDS = 840;                 // ~14 min default (bridges a */15-*/16 cron)
+$SCHED_EVERY     = 60;                  // run the scheduler tick this often (seconds)
+$LONG_POLL       = 50;                  // how long each getUpdates call waits for new updates
 
 $dataDir    = __DIR__ . '/data';
 $lockPath   = $dataDir . '/poll.lock';
@@ -68,26 +85,46 @@ $token   = $config['bot_token'];
 $apiBase = 'https://api.telegram.org/bot' . $token . '/';
 $offset  = (int) @file_get_contents($offsetPath);
 
-// ---- scheduler tick ----
-// Run the scheduling + auto-posting engine once at the start of every poll run.
-// The poll cron fires every minute, so this gives the scheduler near-continuous,
-// per-minute coverage WITHOUT relying on a second cron job (this host has a
-// history of the standalone scheduler cron being missing or misconfigured).
-// Newly-approved promotions get booked here and any post whose time has arrived
-// is published here. We already hold the single-instance lock, so two runs can
-// never post the same booking twice. Wrapped so a scheduler hiccup can never
-// bring the poller down.
-try {
-    require_once __DIR__ . '/includes/scheduler.php';
-    $sched = new HL_Scheduler(__DIR__ . '/data/bot.sqlite', $tg, $config);
-    $sched->run();
-} catch (Throwable $e) {
-    error_log('poll.php scheduler tick failed: ' . $e->getMessage());
+// Allow a host to shorten the run without editing code (e.g. if a host kills
+// long CLI processes). Falls back to the default above.
+$override = (int) $db->getSetting('poll_run_seconds', 0);
+if ($override > 0) {
+    $MAX_RUN_SECONDS = $override;
 }
+
+// ---- scheduler tick ----
+// The scheduling + auto-posting engine runs from INSIDE this poll loop (see
+// runScheduler() below), once at start and then every $SCHED_EVERY seconds for
+// the whole run. This gives near per-minute posting accuracy WITHOUT relying on
+// a separate scheduler cron (this host has a history of that second cron being
+// missing or misconfigured) and WITHOUT depending on how often the poll cron
+// itself fires. Newly-approved promotions get booked here and any post whose
+// time has arrived is published here. We hold the single-instance lock the whole
+// time, so a booking can never be posted twice. Wrapped so a scheduler hiccup
+// can never bring the poller down.
+$runScheduler = function () use ($config, $tg) {
+    try {
+        require_once __DIR__ . '/includes/scheduler.php';
+        $sched = new HL_Scheduler(__DIR__ . '/data/bot.sqlite', $tg, $config);
+        $sched->run();
+    } catch (Throwable $e) {
+        error_log('poll.php scheduler tick failed: ' . $e->getMessage());
+    }
+};
+
+$runScheduler();
+$lastSched = time();
 
 $deadline = time() + $MAX_RUN_SECONDS;
 
 while (time() < $deadline) {
+    // Tick the scheduler roughly every $SCHED_EVERY seconds during the run so
+    // scheduled posts go out on time even on a long-lived run.
+    if (time() - $lastSched >= $SCHED_EVERY) {
+        $runScheduler();
+        $lastSched = time();
+    }
+
     $remaining = $deadline - time();
     $timeout   = min($LONG_POLL, max(1, $remaining));
 
