@@ -1117,8 +1117,22 @@ function promoModerate($adminId, $promoId, $decision) {
         // the approval itself.
         if (function_exists('publishPromotionToWebsite') &&
             $db->getSetting('promo_publish_website', '1') === '1') {
-            try { publishPromotionToWebsite($promo); }
-            catch (Throwable $e) { error_log('promo website publish failed: ' . $e->getMessage()); }
+            try {
+                $res = publishPromotionToWebsite($promo);
+                if (is_array($res) && !empty($res['success']) && !empty($res['osclass_id'])) {
+                    $db->updatePromotion($promoId, [
+                        'website_item_id' => (int) $res['osclass_id'],
+                        'website_status'  => 'live',
+                    ]);
+                } else {
+                    $why = is_array($res) ? ($res['error'] ?? 'unknown') : 'no response';
+                    $db->updatePromotion($promoId, ['website_status' => 'failed']);
+                    error_log('promo website publish returned failure: ' . $why);
+                }
+            } catch (Throwable $e) {
+                $db->updatePromotion($promoId, ['website_status' => 'failed']);
+                error_log('promo website publish failed: ' . $e->getMessage());
+            }
         }
 
         $tg->sendMessage($adminId, "\xE2\x9C\x85 Approved: <b>{$bname}</b>.");

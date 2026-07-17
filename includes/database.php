@@ -136,6 +136,13 @@ class Database {
         if (!in_array('videos', $pcols)) {
             $this->db->exec("ALTER TABLE promotions ADD COLUMN videos TEXT");
         }
+        // Migration: track where/whether each promotion was pushed to the website.
+        if (!in_array('website_item_id', $pcols)) {
+            $this->db->exec("ALTER TABLE promotions ADD COLUMN website_item_id INTEGER");
+        }
+        if (!in_array('website_status', $pcols)) {
+            $this->db->exec("ALTER TABLE promotions ADD COLUMN website_status TEXT");
+        }
     }
 
     public function getUser($telegramId) {
@@ -387,6 +394,7 @@ class Database {
             'business_name', 'business_category', 'description', 'phone', 'website', 'social',
             'address', 'hours', 'logo', 'cta', 'posts_total', 'posts_used',
             'start_date', 'end_date', 'status',
+            'website_item_id', 'website_status',
         ];
         $sets = [];
         $binds = [];

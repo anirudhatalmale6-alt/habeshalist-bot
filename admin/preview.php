@@ -20,7 +20,7 @@ $stmt = hl_db()->prepare('SELECT * FROM promotions WHERE id = :id');
 $stmt->bindValue(':id', $promoId, SQLITE3_INTEGER);
 $promo = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
 
-// Collect every file_id this promotion legitimately owns (logo + images).
+// Collect every image file_id this promotion legitimately owns (logo + images).
 function hl_promo_file_ids($promo) {
     $ids = [];
     if (!empty($promo['logo'])) $ids[] = $promo['logo'];
@@ -31,10 +31,22 @@ function hl_promo_file_ids($promo) {
     return $ids;
 }
 
-// ---- Image proxy ----
-if (isset($_GET['img'])) {
-    $fileId = (string) $_GET['img'];
-    if (!$promo || !in_array($fileId, hl_promo_file_ids($promo), true)) {
+// Collect the video file_ids this promotion owns.
+function hl_promo_video_ids($promo) {
+    $ids = [];
+    if (!empty($promo['videos'])) {
+        $vids = json_decode($promo['videos'], true);
+        if (is_array($vids)) foreach ($vids as $v) { if ($v) $ids[] = $v; }
+    }
+    return $ids;
+}
+
+// ---- Media proxy (images via ?img=, videos via ?vid=) ----
+if (isset($_GET['img']) || isset($_GET['vid'])) {
+    $isVid  = isset($_GET['vid']);
+    $fileId = (string) ($isVid ? $_GET['vid'] : $_GET['img']);
+    $allowed = $isVid ? hl_promo_video_ids($promo ?: []) : hl_promo_file_ids($promo ?: []);
+    if (!$promo || !in_array($fileId, $allowed, true)) {
         http_response_code(404); exit('Not found');
     }
     $token = hl_effective_secret('TELEGRAM_BOT_TOKEN', 'sec_bot_token');
@@ -48,16 +60,17 @@ if (isset($_GET['img'])) {
     $bin = false;
     if (function_exists('curl_init')) {
         $ch = curl_init($url);
-        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 15]);
+        curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30]);
         $bin = curl_exec($ch);
         curl_close($ch);
     }
     if ($bin === false) { $bin = @file_get_contents($url); }
-    if ($bin === false) { http_response_code(502); exit('Could not fetch image'); }
+    if ($bin === false) { http_response_code(502); exit('Could not fetch media'); }
 
     $ext = strtolower(pathinfo($path, PATHINFO_EXTENSION));
-    $types = ['jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif', 'webp' => 'image/webp'];
-    header('Content-Type: ' . ($types[$ext] ?? 'application/octet-stream'));
+    $types = ['jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png', 'gif' => 'image/gif',
+              'webp' => 'image/webp', 'mp4' => 'video/mp4', 'mov' => 'video/quicktime', 'webm' => 'video/webm'];
+    header('Content-Type: ' . ($types[$ext] ?? ($isVid ? 'video/mp4' : 'application/octet-stream')));
     header('Cache-Control: private, max-age=300');
     echo $bin;
     exit;
@@ -149,6 +162,8 @@ $fileIds = hl_promo_file_ids($promo);
 $logoId = $promo['logo'] ?? '';
 $imageIds = [];
 if (!empty($promo['images'])) { $d = json_decode($promo['images'], true); if (is_array($d)) $imageIds = array_filter($d); }
+$videoIds = [];
+if (!empty($promo['videos'])) { $d = json_decode($promo['videos'], true); if (is_array($d)) $videoIds = array_filter($d); }
 $postText = nl2br(hl_preview_post_text($promo));
 list($pillCls, $pillLabel) = hl_status_meta($promo['status'] ?? '');
 ?>
@@ -161,6 +176,8 @@ list($pillCls, $pillLabel) = hl_status_meta($promo['status'] ?? '');
   .tg-bubble img { max-width:100%; border-radius:10px; margin-bottom:10px; display:block; }
   .tg-imgs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
   .tg-imgs img { width:calc(50% - 3px); border-radius:8px; margin:0; }
+  .tg-vids { display:flex; flex-wrap:wrap; gap:6px; }
+  .tg-vids video { width:100%; max-width:100%; border-radius:10px; background:#000; }
   .kv { width:100%; border-collapse:collapse; }
   .kv td { padding:7px 8px; border-bottom:1px solid rgba(128,128,128,.18); vertical-align:top; }
   .kv td.k { color:#6b7280; white-space:nowrap; width:130px; }
@@ -197,6 +214,13 @@ list($pillCls, $pillLabel) = hl_status_meta($promo['status'] ?? '');
             <?php endforeach; ?>
           </div>
         <?php endif; ?>
+        <?php if ($videoIds): ?>
+          <div class="tg-vids" style="margin-top:8px;">
+            <?php foreach ($videoIds as $vid): ?>
+              <video controls preload="metadata" src="preview.php?id=<?= $promoId ?>&amp;vid=<?= urlencode($vid) ?>"></video>
+            <?php endforeach; ?>
+          </div>
+        <?php endif; ?>
       </div>
     </div>
 
@@ -205,6 +229,19 @@ list($pillCls, $pillLabel) = hl_status_meta($promo['status'] ?? '');
         <tr><td class="k">Plan</td><td><?= h(hl_plan_name($promo['package_key'])) ?> &middot; <?= h(hl_money($promo['price'])) ?></td></tr>
         <tr><td class="k">Schedule</td><td><?= h(hl_preview_schedule($promo)) ?></td></tr>
         <tr><td class="k">Posts</td><td><?= (int) ($promo['posts_used'] ?? 0) ?> / <?= (int) ($promo['posts_total'] ?? 0) ?></td></tr>
+        <tr><td class="k">Media</td><td><?= count($imageIds) + ($logoId ? 1 : 0) ?> photo(s), <?= count($videoIds) ?> video(s)</td></tr>
+        <?php
+          $ws = $promo['website_status'] ?? '';
+          $wid = (int) ($promo['website_item_id'] ?? 0);
+          if ($ws === 'live' && $wid) {
+              $wLabel = 'Live on website (listing #' . $wid . ')';
+          } elseif ($ws === 'failed') {
+              $wLabel = 'Not posted (website error - check logs)';
+          } else {
+              $wLabel = 'Posts to website on approval';
+          }
+        ?>
+        <tr><td class="k">Website</td><td><?= h($wLabel) ?></td></tr>
         <tr><td class="k">Payment</td><td><?= h(strtoupper($promo['payment_method'] ?: 'n/a')) ?> &middot; <?= h($promo['payment_status'] ?: '-') ?></td></tr>
         <tr><td class="k">Receipt</td><td class="mono"><?= h($promo['receipt'] ?: '-') ?></td></tr>
         <tr><td class="k">Phone</td><td><?= h($promo['phone'] ?: '-') ?></td></tr>

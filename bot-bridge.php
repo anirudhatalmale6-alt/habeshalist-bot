@@ -252,38 +252,59 @@ function createListing($data) {
         }
 
         $photos = $data['photos'] ?? [];
-        $botToken = 'REDACTED';
+        $videos = $data['videos'] ?? [];
+        // The bot passes its token in the payload so it never has to be hardcoded
+        // here. A hardcoded fallback is kept only for manual/legacy calls.
+        $botToken = !empty($data['bot_token']) ? $data['bot_token'] : '';
         $uploadDir = osc_content_path() . 'uploads/';
         if (!is_dir($uploadDir)) @mkdir($uploadDir, 0755, true);
 
-        foreach ($photos as $idx => $fileId) {
-            $fileInfo = json_decode(file_get_contents("https://api.telegram.org/bot{$botToken}/getFile?file_id={$fileId}"), true);
-            if (!$fileInfo || !$fileInfo['ok']) continue;
+        // Download a Telegram file by file_id and store it as an OSClass item
+        // resource (photo or video). Returns true on success. Never fatal.
+        $storeMedia = function ($fileId, $isVideo) use ($dao, $prefix, $uploadDir, $itemId, $botToken) {
+            if ($botToken === '' || $fileId === '') return false;
+            $fileId = rawurlencode($fileId);
+            $info = @file_get_contents("https://api.telegram.org/bot{$botToken}/getFile?file_id={$fileId}");
+            $fileInfo = $info ? json_decode($info, true) : null;
+            if (!$fileInfo || empty($fileInfo['ok'])) return false;
 
-            $filePath = $fileInfo['result']['file_path'];
-            $imageData = file_get_contents("https://api.telegram.org/file/bot{$botToken}/{$filePath}");
-            if (!$imageData) continue;
+            $filePath = $fileInfo['result']['file_path'] ?? '';
+            if ($filePath === '') return false;
+            $bin = @file_get_contents("https://api.telegram.org/file/bot{$botToken}/{$filePath}");
+            if ($bin === false || $bin === '') return false;
 
-            $ext = pathinfo($filePath, PATHINFO_EXTENSION) ?: 'jpg';
-            $contentType = ($ext === 'png') ? 'image/png' : 'image/jpeg';
+            $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
+            if ($isVideo) {
+                if ($ext === '') $ext = 'mp4';
+                $contentType = ($ext === 'mov') ? 'video/quicktime' : 'video/mp4';
+            } else {
+                if ($ext === '') $ext = 'jpg';
+                $contentType = ($ext === 'png') ? 'image/png' : (($ext === 'webp') ? 'image/webp' : 'image/jpeg');
+            }
 
             $dao->query(
                 "INSERT INTO {$prefix}t_item_resource (fk_i_item_id, s_name, s_extension, s_content_type, s_path) " .
                 "VALUES ({$itemId}, 'temp', '{$ext}', '{$contentType}', 'oc-content/uploads/')"
             );
             $resourceId = $dao->insertedId();
+            if (!$resourceId) return false;
 
-            if (!$resourceId) continue;
+            $dao->query("UPDATE {$prefix}t_item_resource SET s_name = '{$resourceId}' WHERE pk_i_id = {$resourceId}");
 
-            $dao->query(
-                "UPDATE {$prefix}t_item_resource SET s_name = '{$resourceId}' WHERE pk_i_id = {$resourceId}"
-            );
+            file_put_contents($uploadDir . $resourceId . '.' . $ext, $bin);
+            if ($isVideo) {
+                // Videos have no image derivatives; keep an _original for downloads.
+                @copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_original.' . $ext);
+            } else {
+                @copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_original.' . $ext);
+                @copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_preview.' . $ext);
+                @copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_thumbnail.' . $ext);
+            }
+            return true;
+        };
 
-            file_put_contents($uploadDir . $resourceId . '.' . $ext, $imageData);
-            copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_original.' . $ext);
-            copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_preview.' . $ext);
-            copy($uploadDir . $resourceId . '.' . $ext, $uploadDir . $resourceId . '_thumbnail.' . $ext);
-        }
+        foreach ($photos as $fileId) { $storeMedia($fileId, false); }
+        foreach ($videos as $fileId) { $storeMedia($fileId, true); }
 
         // Only count the item in category stats once it is actually live
         if ($enabled && class_exists('CategoryStats')) {

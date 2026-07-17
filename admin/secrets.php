@@ -138,6 +138,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // key to paste instead.
                 $flash = 'Not saved - that is your Publishable key (pk_...). Card charges need your SECRET key, which starts with sk_live_ (or sk_test_). In Stripe: Developers > API keys > Secret key > Reveal, then paste that here.';
                 $flashType = 'err';
+            } elseif (!preg_match('/^(sk|rk)_(live|test)_[A-Za-z0-9]{20,}$/', $new)) {
+                // A masked/partly-copied key (the "sk_live_51ABC...•••" you see before
+                // clicking Reveal) is the usual cause of "Invalid API Key provided".
+                // Catch it here with a precise hint instead of a generic Stripe error.
+                $flash = 'Not saved - this does not look like a complete key. A real secret key starts with sk_live_ or sk_test_ followed by ~100 letters/numbers, with no dots or spaces. In Stripe: Developers > API keys > next to Secret key click "Reveal", then Copy the FULL value and paste it here.';
+                $flashType = 'err';
             } else {
                 // Verify the key against Stripe BEFORE saving, so a bad/expired key
                 // (the exact thing that produced "checkout unavailable") is caught

@@ -1492,9 +1492,10 @@ function publishToOSClass($adData, $userId) {
 
 // Publish an APPROVED promotion to the website as a listing (in addition to the
 // Telegram group post). Businesses go under the general Services category by
-// default; photos (logo + extra images) are carried over. Videos are group-only
-// since the website stores image resources. Guarded by the caller so a website
-// hiccup can never block an approval.
+// default; the logo, extra photos AND videos are all carried over. The bot token
+// is passed in the payload so the bridge can download the media from Telegram
+// without needing the token hardcoded on the website side. Guarded by the caller
+// so a website hiccup can never block an approval.
 function publishPromotionToWebsite($promo) {
     global $config, $db;
 
@@ -1513,12 +1514,19 @@ function publishPromotionToWebsite($promo) {
     if (!empty($promo['logo'])) $photos[] = $promo['logo'];
     if (!empty($promo['images'])) {
         $imgs = json_decode($promo['images'], true);
-        if (is_array($imgs)) $photos = array_merge($photos, $imgs);
+        if (is_array($imgs)) $photos = array_merge($photos, array_filter($imgs));
+    }
+
+    $videos = [];
+    if (!empty($promo['videos'])) {
+        $vids = json_decode($promo['videos'], true);
+        if (is_array($vids)) $videos = array_filter($vids);
     }
 
     $payload = [
         'secret'          => $config['api_secret'],
         'action'          => 'create_listing',
+        'bot_token'       => $config['bot_token'] ?? '',
         'telegram_id'     => (int) $promo['telegram_id'],
         'category'        => 'services',
         'subcategory'     => 'other_services',
@@ -1531,9 +1539,10 @@ function publishPromotionToWebsite($promo) {
         'contact_email'   => $user['email'] ?? '',
         'osclass_user_id' => $osUserId,
         'photos'          => $photos,
+        'videos'          => array_values($videos),
         'auto_approve'    => true,   // paid + admin-approved -> go live on the site immediately
     ];
-    return callBridge($payload, 30);
+    return callBridge($payload, 45);
 }
 
 // Create/find the matching OSClass website account so the user shows in the admin panel
