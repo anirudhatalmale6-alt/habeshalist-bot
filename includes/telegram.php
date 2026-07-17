@@ -68,10 +68,27 @@ class Telegram {
         return $this->callApi('sendPhoto', $params);
     }
 
+    public function sendVideo($chatId, $fileId, $caption = null) {
+        $params = ['chat_id' => $chatId, 'video' => $fileId, 'supports_streaming' => true];
+        if ($caption) {
+            $params['caption'] = $caption;
+            $params['parse_mode'] = 'HTML';
+        }
+        return $this->callApi('sendVideo', $params);
+    }
+
+    // Accepts either a flat list of photo file_ids, or a list of
+    // ['type' => 'photo'|'video', 'media' => fileId] items (so a promo's photos
+    // and videos can go out as one album).
     public function sendMediaGroup($chatId, $fileIds) {
         $media = [];
         foreach ($fileIds as $fid) {
-            $media[] = ['type' => 'photo', 'media' => $fid];
+            if (is_array($fid) && isset($fid['media'])) {
+                $type = ($fid['type'] ?? 'photo') === 'video' ? 'video' : 'photo';
+                $media[] = ['type' => $type, 'media' => $fid['media']];
+            } else {
+                $media[] = ['type' => 'photo', 'media' => $fid];
+            }
         }
         if (empty($media)) return null;
         return $this->callApi('sendMediaGroup', ['chat_id' => $chatId, 'media' => $media]);

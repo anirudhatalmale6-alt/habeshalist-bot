@@ -383,8 +383,14 @@ function promoPaymentProceed($userId, $state, $proofFileId) {
 function promoStartForm($userId, $data) {
     global $db;
     if (!isset($data['images'])) $data['images'] = [];
+    if (!isset($data['videos'])) $data['videos'] = [];
     $db->setState($userId, 'promo_business_name', $data);
     promoPromptStep($userId, 'business_name', $data, false);
+}
+
+// Combined photo+video count for the media step (capped together at 5).
+function promoMediaCount($data) {
+    return count($data['images'] ?? []) + count($data['videos'] ?? []);
 }
 
 function promoStepHeader($field) {
@@ -479,8 +485,9 @@ function promoPromptStep($userId, $field, $data, $isEdit = false) {
             } else {
                 $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back to Review", 'callback_data' => 'promo_back_review']];
             }
+            $cnt = promoMediaCount($data);
             $tg->sendInlineButtons($userId,
-                $header . $current . "\xF0\x9F\x93\xB8 Send up to 5 <b>additional images</b> for your ad. Tap Done when finished." .
+                $header . $current . "\xF0\x9F\x93\xB8 Send up to 5 <b>photos or videos</b> for your ad. Tap Done when finished." .
                 ($cnt ? "\n\nSo far: {$cnt}/5" : ''),
                 $rows
             );
@@ -688,14 +695,15 @@ function promoHandlePhoto($userId, $msg) {
 
     if ($field === 'images') {
         $data['images'] = $data['images'] ?? [];
-        $doneCb = $isEdit ? 'promo_images_done' : 'promo_images_done';
+        $data['videos'] = $data['videos'] ?? [];
+        $doneCb = 'promo_images_done';
 
-        if (count($data['images']) >= 5) {
+        if (promoMediaCount($data) >= 5) {
             if (empty($data['_img_max_notified'])) {
                 $data['_img_max_notified'] = true;
                 $db->setState($userId, $st, $data);
                 $tg->sendInlineButtons($userId,
-                    "\xF0\x9F\x93\xB8 Maximum of 5 images reached. Tap Done to continue.",
+                    "\xF0\x9F\x93\xB8 Maximum of 5 items reached. Tap Done to continue.",
                     [[['text' => "\xE2\x9C\x85 Done", 'callback_data' => $doneCb]]]
                 );
             }
@@ -703,7 +711,7 @@ function promoHandlePhoto($userId, $msg) {
         }
 
         $data['images'][] = $photo['file_id'];
-        $count = count($data['images']);
+        $count = promoMediaCount($data);
 
         // De-dupe the confirmation message for album uploads
         $mediaGroupId = $msg['media_group_id'] ?? null;
@@ -729,6 +737,78 @@ function promoHandlePhoto($userId, $msg) {
     }
 
     return false;
+}
+
+// Video uploads during the media step. Mirrors promoHandlePhoto's images branch
+// so a video is accepted exactly like a photo and gets the same confirmation.
+function promoHandleVideo($userId, $msg) {
+    global $tg, $db;
+
+    $state = $db->getState($userId);
+    $st = $state['state'];
+    if (strpos($st, 'promo_') !== 0) return false;
+    $data = $state['data'];
+
+    // Pull the file_id from a video message, or a video sent as a document.
+    $fileId = '';
+    if (isset($msg['video']['file_id'])) {
+        $fileId = $msg['video']['file_id'];
+    } elseif (isset($msg['document']['file_id']) &&
+              isset($msg['document']['mime_type']) &&
+              strpos($msg['document']['mime_type'], 'video/') === 0) {
+        $fileId = $msg['document']['file_id'];
+    }
+    if ($fileId === '') return false;
+
+    $isEdit = promoIsEdit($state);
+    $field = $isEdit ? substr($st, strlen('promo_edit_')) : substr($st, strlen('promo_'));
+
+    // Videos are only meaningful on the media ("images") step.
+    if ($field !== 'images') {
+        $tg->sendMessage($userId, "Please add videos on the photos/videos step of the form.");
+        return true;
+    }
+
+    $data['images'] = $data['images'] ?? [];
+    $data['videos'] = $data['videos'] ?? [];
+    $doneCb = 'promo_images_done';
+
+    if (promoMediaCount($data) >= 5) {
+        if (empty($data['_img_max_notified'])) {
+            $data['_img_max_notified'] = true;
+            $db->setState($userId, $st, $data);
+            $tg->sendInlineButtons($userId,
+                "\xF0\x9F\x93\xB8 Maximum of 5 items reached. Tap Done to continue.",
+                [[['text' => "\xE2\x9C\x85 Done", 'callback_data' => $doneCb]]]
+            );
+        }
+        return true;
+    }
+
+    $data['videos'][] = $fileId;
+    $count = promoMediaCount($data);
+
+    // De-dupe the confirmation for album uploads (same as photos).
+    $mediaGroupId = $msg['media_group_id'] ?? null;
+    $sendMsg = !($mediaGroupId && $mediaGroupId === ($data['_last_media_group'] ?? null));
+    if ($mediaGroupId) $data['_last_media_group'] = $mediaGroupId;
+
+    $db->setState($userId, $st, $data);
+
+    if ($count >= 5) {
+        $data['_img_max_notified'] = true;
+        $db->setState($userId, $st, $data);
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x8E\xA5 Video received! (5/5) Maximum reached. Tap Done to continue.",
+            [[['text' => "\xE2\x9C\x85 Done", 'callback_data' => $doneCb]]]
+        );
+    } elseif ($sendMsg) {
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x8E\xA5 Video received! ({$count}/5)\n\nSend more or tap Done.",
+            [[['text' => "\xE2\x9C\x85 Done", 'callback_data' => $doneCb]]]
+        );
+    }
+    return true;
 }
 
 // ---- Callback-driven field actions ----
@@ -780,6 +860,9 @@ function promoImagesDone($userId, $state) {
     unset($data['_last_media_group'], $data['_img_max_notified']);
     if (promoIsEdit($state)) {
         promoPersistEditField($data, 'images');
+        // videos aren't a standalone form step, so persist them explicitly.
+        $id = (int) ($data['_edit_promo_id'] ?? 0);
+        if ($id > 0) $db->updatePromotion($id, ['videos' => $data['videos'] ?? []]);
         $db->setState($userId, 'promo_review', $data);
         promoShowReview($userId, $data);
     } else {
@@ -805,7 +888,8 @@ function promoSummaryText($data, $forAdmin = false) {
     if (!empty($data['cta'])) $lines[] = "\xF0\x9F\x91\x89 <b>{$data['cta']}</b>";
     $logoTxt = !empty($data['logo']) ? 'Yes' : 'No';
     $imgCount = count($data['images'] ?? []);
-    $lines[] = "\xF0\x9F\x96\xBC Logo: {$logoTxt}   \xF0\x9F\x93\xB8 Images: {$imgCount}";
+    $vidCount = count($data['videos'] ?? []);
+    $lines[] = "\xF0\x9F\x96\xBC Logo: {$logoTxt}   \xF0\x9F\x93\xB8 Images: {$imgCount}   \xF0\x9F\x8E\xA5 Videos: {$vidCount}";
 
     $meta = "\xF0\x9F\x93\xA6 Package: <b>" . ($pkg['name'] ?? '') . "</b> (" . promoFmtPrice($data['price'] ?? 0) . ")\n";
     if ($forAdmin) {
@@ -1016,6 +1100,16 @@ function promoModerate($adminId, $promoId, $decision) {
         // next scheduler tick. Booking never posts to Telegram - only the
         // scheduler's postDue() does - so this is safe to run inline.
         promoRebookNow($promoId);
+
+        // Also publish the business to the website (in addition to the group
+        // post), if enabled. Wrapped so any website/bridge hiccup can never block
+        // the approval itself.
+        if (function_exists('publishPromotionToWebsite') &&
+            $db->getSetting('promo_publish_website', '1') === '1') {
+            try { publishPromotionToWebsite($promo); }
+            catch (Throwable $e) { error_log('promo website publish failed: ' . $e->getMessage()); }
+        }
+
         $tg->sendMessage($adminId, "\xE2\x9C\x85 Approved: <b>{$bname}</b>.");
         $tg->sendInlineButtons($posterTid,
             "\xF0\x9F\x8E\x89 <b>Great news!</b> Your promotion for <b>{$bname}</b> has been approved.\n\n" .
@@ -1184,13 +1278,21 @@ function promoShowPreview($userId, $data) {
     $text = HL_Scheduler::renderPostText($data);
     $logo = $data['logo'] ?? '';
     $images = $data['images'] ?? [];
+    $videos = $data['videos'] ?? [];
 
     // Header note so it's clear this block is the live preview.
     $tg->sendMessage($userId,
         "\xF0\x9F\x91\x81 <b>Preview</b> - this is exactly how your ad will look in the group:");
 
+    // Mirror exactly what postOne() sends to the group.
     if ($logo !== '') {
         $tg->sendPhoto($userId, $logo, $text);
+        if (!empty($images)) $tg->sendMediaGroup($userId, $images);
+        foreach ($videos as $v) { $tg->sendVideo($userId, $v); }
+    } elseif (!empty($videos)) {
+        $tg->sendVideo($userId, $videos[0], $text);
+        for ($i = 1; $i < count($videos); $i++) { $tg->sendVideo($userId, $videos[$i]); }
+        if (!empty($images)) $tg->sendMediaGroup($userId, $images);
     } elseif (!empty($images)) {
         $tg->sendMediaGroup($userId, $images);
         $tg->sendMessage($userId, $text);
@@ -1253,7 +1355,7 @@ function promoSchedStart($userId, $state) {
 // inside the bookable window [today .. today+N] are tappable; everything else is
 // shown greyed as a no-op, and the arrows only appear when there's a reachable
 // month in that direction.
-function promoDateGrid($userId, $data, $ym = null) {
+function promoDateGrid($userId, $data, $ym = null, $editMsgId = null) {
     global $tg;
     $key = $data['package_key'] ?? 'one_time';
     $tz = promoSchedTz();
@@ -1324,14 +1426,24 @@ function promoDateGrid($userId, $data, $ym = null) {
     $note = ($key === 'botw')
         ? "Pick the day your Business of the Week feature should start. It stays pinned for the full 7 days."
         : "Tap the date you'd like your post to go out:";
-    $tg->sendInlineButtons($userId, "\xF0\x9F\x93\x85 <b>Choose a date</b>\n\n" . $note, $rows);
+    $body = "\xF0\x9F\x93\x85 <b>Choose a date</b>\n\n" . $note;
+
+    // When navigating months, edit the existing calendar message in place so the
+    // user stays on the SAME calendar (no repeated "Choose a date" messages).
+    // On first open ($editMsgId is null) we post a fresh calendar.
+    if ($editMsgId) {
+        $tg->editMessageText($userId, $editMsgId, $body, ['inline_keyboard' => $rows]);
+    } else {
+        $tg->sendInlineButtons($userId, $body, $rows);
+    }
 }
 
 // ◀/▶ month navigation on the calendar. Re-renders the picker for the chosen
 // month, reusing the current scheduling session's data (so the bookable window
-// for the package is preserved).
-function promoCalendarNav($userId, $ym, $state) {
-    promoDateGrid($userId, $state['data'] ?? [], $ym);
+// for the package is preserved). $editMsgId, when given, edits the calendar in
+// place instead of posting a new one.
+function promoCalendarNav($userId, $ym, $state, $editMsgId = null) {
+    promoDateGrid($userId, $state['data'] ?? [], $ym, $editMsgId);
 }
 
 function promoSchedPickDate($userId, $ymd, $state) {
@@ -1663,6 +1775,11 @@ function promoLoadPromoIntoData($promo) {
         $decoded = json_decode($promo['images'], true);
         if (is_array($decoded)) $images = $decoded;
     }
+    $videos = [];
+    if (!empty($promo['videos'])) {
+        $decoded = json_decode($promo['videos'], true);
+        if (is_array($decoded)) $videos = $decoded;
+    }
     return [
         '_edit_promo_id'    => (int) $promo['id'],
         'package_key'       => $promo['package_key'] ?? '',
@@ -1680,6 +1797,7 @@ function promoLoadPromoIntoData($promo) {
         'hours'             => $promo['hours'] ?? '',
         'logo'              => $promo['logo'] ?? '',
         'images'            => $images,
+        'videos'            => $videos,
         'cta'               => $promo['cta'] ?? '',
         'posts_total'       => (int) ($promo['posts_total'] ?? 0),
     ];
@@ -1745,10 +1863,24 @@ function promoShowDashboard($userId) {
         if ($ed) $line .= " \xE2\x86\x92 " . $ed->format('M j, Y');
         $lines[] = $line;
     }
-    $lines[] = '';
-    $lines[] = "\xF0\x9F\x93\x9D Remaining posts: <b>{$remaining} / {$total}</b>";
-
     $next = $db->getNextPost($pid, promoToday());
+
+    // A plan is COMPLETE once its whole allowance has been used up and there are
+    // no more upcoming posts (e.g. a one-time post that has now gone live). Show
+    // a clean "Completed" card with only a Main Menu button.
+    $isComplete = ($promo['status'] ?? '') === 'approved' && $total > 0 && $used >= $total && !$next;
+    if ($isComplete) {
+        $lines[3] = "Status: <b>\xE2\x9C\x85 Completed</b>";  // replace the raw status line
+        $lines[] = '';
+        $lines[] = "All scheduled posts for this plan have been used.";
+        $tg->sendInlineButtons($userId, implode("\n", $lines),
+            [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+        return;
+    }
+
+    $lines[] = '';
+    $lines[] = "\xF0\x9F\x93\x9D Used posts: <b>{$used} / {$total}</b>";
+
     if ($next) {
         $nd = DateTime::createFromFormat('Y-m-d', $next['post_date'], $tz);
         $nt = !empty($next['post_time']) ? $next['post_time'] : '';

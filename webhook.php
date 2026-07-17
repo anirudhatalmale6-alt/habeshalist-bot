@@ -84,6 +84,14 @@ function handleCallbackQuery($query) {
     $userId = $query['from']['id'];
     $state = $db->getState($userId);
 
+    // Calendar cells must NOT tear down the calendar keyboard. Handle them BEFORE
+    // the "deactivate buttons" step below so:
+    //   - a filler / disabled (past) date is a silent no-op (calendar stays put)
+    //   - a month arrow edits the SAME calendar message in place (no new "Choose
+    //     a date" message each time you navigate).
+    if ($data === 'pnop') { return; }
+    if (strpos($data, 'pcaln_') === 0) { promoCalendarNav($userId, substr($data, 6), $state, $msgId); return; }
+
     // Deactivate buttons on the clicked message
     if ($msgId) {
         $tg->editMessageReplyMarkup($chatId, $msgId);
@@ -166,8 +174,7 @@ function handleCallbackQuery($query) {
 
     if ($data === 'promo_preview') { promoShowPreview($userId, $state['data']); return; }
     if ($data === 'promo_sched_start') { promoSchedStart($userId, $state); return; }
-    if ($data === 'pnop') { return; }   // calendar filler / disabled cell (already ack'd)
-    if (strpos($data, 'pcaln_') === 0) { promoCalendarNav($userId, substr($data, 6), $state); return; }
+    // (pnop and pcaln_ are handled earlier, before the keyboard is torn down.)
     if (strpos($data, 'pschd_') === 0) { promoSchedPickDate($userId, substr($data, 6), $state); return; }
     if (strpos($data, 'pschrt_') === 0) {
         $rest = substr($data, 7);                 // "<slot>_<hhmm|custom>"
@@ -546,6 +553,16 @@ function handleMessage($msg) {
             if (promoHandlePhoto($userId, $msg)) return;
         }
         if (handlePhotoMessage($userId, $msg)) return;
+    }
+
+    // Video messages in private chat (promotion media step accepts videos too)
+    $isVideoMsg = isset($msg['video']) ||
+        (isset($msg['document']['mime_type']) && strpos($msg['document']['mime_type'], 'video/') === 0);
+    if ($isPrivate && $isVideoMsg) {
+        $vs = $db->getState($userId);
+        if (strpos($vs['state'], 'promo_') === 0) {
+            if (promoHandleVideo($userId, $msg)) return;
+        }
     }
 
     // State-based conversation in private chat
@@ -1470,6 +1487,52 @@ function publishToOSClass($adData, $userId) {
         'photos' => $adData['photos'] ?? [],
     ];
 
+    return callBridge($payload, 30);
+}
+
+// Publish an APPROVED promotion to the website as a listing (in addition to the
+// Telegram group post). Businesses go under the general Services category by
+// default; photos (logo + extra images) are carried over. Videos are group-only
+// since the website stores image resources. Guarded by the caller so a website
+// hiccup can never block an approval.
+function publishPromotionToWebsite($promo) {
+    global $config, $db;
+
+    $user = $db->getUser((int) $promo['telegram_id']);
+    $osUserId = $user['osclass_user_id'] ?? null;
+
+    $descParts = [];
+    if (!empty($promo['description'])) $descParts[] = $promo['description'];
+    if (!empty($promo['phone']))   $descParts[] = "\xE2\x98\x8E Phone: " . $promo['phone'];
+    if (!empty($promo['website'])) $descParts[] = "Website: " . $promo['website'];
+    if (!empty($promo['social']))  $descParts[] = "Social: " . $promo['social'];
+    if (!empty($promo['hours']))   $descParts[] = "Hours: " . $promo['hours'];
+    $description = implode("\n", $descParts);
+
+    $photos = [];
+    if (!empty($promo['logo'])) $photos[] = $promo['logo'];
+    if (!empty($promo['images'])) {
+        $imgs = json_decode($promo['images'], true);
+        if (is_array($imgs)) $photos = array_merge($photos, $imgs);
+    }
+
+    $payload = [
+        'secret'          => $config['api_secret'],
+        'action'          => 'create_listing',
+        'telegram_id'     => (int) $promo['telegram_id'],
+        'category'        => 'services',
+        'subcategory'     => 'other_services',
+        'title'           => $promo['business_name'] ?: 'Business',
+        'description'     => $description,
+        'price'           => '',
+        'city'            => $promo['address'] ?? '',
+        'address'         => $promo['address'] ?? '',
+        'contact_name'    => $user['name'] ?? ($promo['business_name'] ?? ''),
+        'contact_email'   => $user['email'] ?? '',
+        'osclass_user_id' => $osUserId,
+        'photos'          => $photos,
+        'auto_approve'    => true,   // paid + admin-approved -> go live on the site immediately
+    ];
     return callBridge($payload, 30);
 }
 

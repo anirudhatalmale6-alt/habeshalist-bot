@@ -93,7 +93,7 @@ check('committed count is 1', $db->countCommittedPosts($pid) === 1);
 reset_out();
 promoShowDashboard($UID);
 $dash = lastText();
-check('dashboard shows Remaining posts: 0 / 1', strpos($dash, 'Remaining posts: <b>0 / 1</b>') !== false);
+check('dashboard shows Used posts: 1 / 1', strpos($dash, 'Used posts: <b>1 / 1</b>') !== false);
 check('dashboard Next post line filled (not "-")', strpos($dash, "Next post: <b>-</b>") === false);
 reset_out();
 promoDashMyAds($UID);
@@ -117,7 +117,15 @@ check('something was actually sent to the group', count($GLOBALS['__SENT']) > 0)
 // After posting, the allowance is fully used.
 reset_out();
 promoShowDashboard($UID);
-check('dashboard still shows Remaining 0 / 1 after posting', strpos(lastText(), 'Remaining posts: <b>0 / 1</b>') !== false);
+$doneDash = lastText();
+check('dashboard shows Completed status after posting', strpos($doneDash, "\xE2\x9C\x85 Completed") !== false);
+check('dashboard shows all-posts-used message', strpos($doneDash, 'All scheduled posts for this plan have been used.') !== false);
+check('completed dashboard has only a Main Menu button', (function () {
+    foreach (lastRows() as $r) foreach ($r as $b) {
+        if (($b['callback_data'] ?? '') !== 'main_menu') return false;
+    }
+    return true;
+})());
 
 echo "\n[5] Calendar date picker renders a month grid\n";
 reset_out();

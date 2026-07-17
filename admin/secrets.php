@@ -25,7 +25,7 @@ $SECRETS = [
         'label'    => 'Stripe secret key',
         'env'      => 'STRIPE_KEY',
         'setkey'   => 'sec_stripe_key',
-        'hint'     => 'Starts with sk_live_ or sk_test_ (or a restricted rk_ key).',
+        'hint'     => 'Use your SECRET key (starts with sk_live_ or sk_test_, or a restricted rk_ key) - NOT the Publishable pk_ key.',
         'validate' => 'stripe',
     ],
     'provider_token' => [
@@ -101,7 +101,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         } else {
-            if ($meta['validate'] === 'stripe' && !preg_match('/^(sk|rk)_(live|test)_/', $new)) {
+            if ($meta['validate'] === 'stripe' && preg_match('/^pk_(live|test)_/', $new)) {
+                // HARD stop: a Publishable key (pk_) cannot create charges. This is
+                // the single most common mistake, so refuse it and say exactly which
+                // key to paste instead.
+                $flash = 'Not saved - that is your Publishable key (pk_...). Card charges need your SECRET key, which starts with sk_live_ (or sk_test_). In Stripe: Developers > API keys > Secret key > Reveal, then paste that here.';
+                $flashType = 'err';
+            } elseif ($meta['validate'] === 'stripe' && !preg_match('/^(sk|rk)_(live|test)_/', $new)) {
                 // soft warning only - still saved
                 $blob = hl_encrypt_secret($new, $appKey);
                 if ($blob === false) { $flash = 'Encryption failed on this server.'; $flashType = 'err'; }

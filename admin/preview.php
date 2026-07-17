@@ -79,17 +79,37 @@ if ($mod) {
 // Build the exact group-post text (mirrors HL_Scheduler::renderPostText).
 function hl_preview_post_text($p) {
     $e = function ($s) { return h($s); };
+    $tag = function ($s) {
+        $s = preg_replace('/[^\p{L}\p{N}]+/u', ' ', (string) $s);
+        $parts = array_filter(explode(' ', trim($s)), 'strlen');
+        $out = '';
+        foreach ($parts as $part) { $out .= function_exists('mb_convert_case') ? mb_convert_case($part, MB_CASE_TITLE, 'UTF-8') : ucfirst($part); }
+        return $out === '' ? '' : '#' . $out;
+    };
+
+    $divider = str_repeat("\xE2\x94\x81", 18);
+    $name = function_exists('mb_strtoupper') ? mb_strtoupper((string) ($p['business_name'] ?: 'Featured Business'), 'UTF-8') : strtoupper($p['business_name'] ?: 'Featured Business');
+
     $lines = [];
-    $lines[] = "\xF0\x9F\x93\xA2 <b>" . $e($p['business_name'] ?: 'Featured Business') . "</b>";
-    if (!empty($p['business_category'])) $lines[] = $e($p['business_category']);
+    $lines[] = $divider;
+    $lines[] = "\xF0\x9F\x93\xA2 <b>" . $e($name) . "</b>";
+    $lines[] = $divider;
     $lines[] = '';
-    if (!empty($p['description'])) { $lines[] = $e($p['description']); $lines[] = ''; }
-    if (!empty($p['phone']))   $lines[] = "\xF0\x9F\x93\x9E " . $e($p['phone']);
-    if (!empty($p['website'])) $lines[] = "\xF0\x9F\x8C\x90 " . $e($p['website']);
-    if (!empty($p['social']))  $lines[] = "\xF0\x9F\x94\x97 " . $e($p['social']);
-    if (!empty($p['address'])) $lines[] = "\xF0\x9F\x93\x8D " . $e($p['address']);
-    if (!empty($p['hours']))   $lines[] = "\xF0\x9F\x95\x92 " . $e($p['hours']);
-    if (!empty($p['cta']))     { $lines[] = ''; $lines[] = "\xF0\x9F\x91\x89 " . $e($p['cta']); }
+    if (!empty($p['business_category'])) { $lines[] = "\xF0\x9F\x8F\xB7\xEF\xB8\x8F Category: " . $e($p['business_category']); $lines[] = ''; }
+    if (!empty($p['description']))       { $lines[] = "\xF0\x9F\x93\x9D " . $e($p['description']); $lines[] = ''; }
+    if (!empty($p['address'])) { $lines[] = "\xF0\x9F\x93\x8D Location: " . $e($p['address']); $lines[] = ''; }
+    if (!empty($p['phone']))   { $lines[] = "\xF0\x9F\x93\x9E Contact: " . $e($p['phone']); $lines[] = ''; }
+    if (!empty($p['website'])) { $lines[] = "\xF0\x9F\x8C\x90 " . $e($p['website']); $lines[] = ''; }
+    if (!empty($p['social']))  { $lines[] = "\xF0\x9F\x94\x97 " . $e($p['social']); $lines[] = ''; }
+    if (!empty($p['hours']))   { $lines[] = "\xF0\x9F\x95\x92 " . $e($p['hours']); $lines[] = ''; }
+    if (!empty($p['cta']))     { $lines[] = "\xF0\x9F\x91\x89 " . $e($p['cta']); $lines[] = ''; }
+
+    $tags = [];
+    if (!empty($p['business_category'])) { $t = $tag($p['business_category']); if ($t) $tags[] = $t; }
+    if (!empty($p['address']))           { $t = $tag($p['address']);           if ($t) $tags[] = $t; }
+    $tags[] = '#HabeshaList';
+    $lines[] = implode(' ', array_unique($tags));
+
     return trim(implode("\n", $lines));
 }
 

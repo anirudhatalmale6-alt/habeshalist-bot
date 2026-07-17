@@ -128,6 +128,14 @@ class Database {
         if (!in_array('osclass_user_id', $cols)) {
             $this->db->exec("ALTER TABLE users ADD COLUMN osclass_user_id INTEGER");
         }
+
+        // Migration: promotions can now carry video attachments alongside photos.
+        $pcols = [];
+        $res = $this->db->query("PRAGMA table_info(promotions)");
+        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $pcols[] = $r['name']; }
+        if (!in_array('videos', $pcols)) {
+            $this->db->exec("ALTER TABLE promotions ADD COLUMN videos TEXT");
+        }
     }
 
     public function getUser($telegramId) {
@@ -247,11 +255,11 @@ class Database {
         $stmt = $this->db->prepare('INSERT INTO promotions
             (telegram_id, package_key, price, payment_method, payment_status, payment_proof, receipt,
              business_name, business_category, description, phone, website, social, address, hours,
-             logo, images, cta, posts_total, posts_used, start_date, end_date, schedule, status)
+             logo, images, videos, cta, posts_total, posts_used, start_date, end_date, schedule, status)
             VALUES
             (:tid, :pkg, :price, :pm, :ps, :proof, :receipt,
              :bname, :bcat, :desc, :phone, :website, :social, :address, :hours,
-             :logo, :images, :cta, :ptotal, :pused, :sdate, :edate, :sched, :status)');
+             :logo, :images, :videos, :cta, :ptotal, :pused, :sdate, :edate, :sched, :status)');
         $stmt->bindValue(':tid', $telegramId, SQLITE3_INTEGER);
         $stmt->bindValue(':pkg', $data['package_key'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':price', $data['price'] ?? 0, SQLITE3_FLOAT);
@@ -269,6 +277,7 @@ class Database {
         $stmt->bindValue(':hours', $data['hours'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':logo', $data['logo'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':images', json_encode($data['images'] ?? []), SQLITE3_TEXT);
+        $stmt->bindValue(':videos', json_encode($data['videos'] ?? []), SQLITE3_TEXT);
         $stmt->bindValue(':cta', $data['cta'] ?? '', SQLITE3_TEXT);
         $stmt->bindValue(':ptotal', $data['posts_total'] ?? 0, SQLITE3_INTEGER);
         $stmt->bindValue(':pused', $data['posts_used'] ?? 0, SQLITE3_INTEGER);
@@ -382,7 +391,7 @@ class Database {
         $sets = [];
         $binds = [];
         foreach ($fields as $k => $v) {
-            if ($k === 'images' || $k === 'schedule') {
+            if ($k === 'images' || $k === 'videos' || $k === 'schedule') {
                 $sets[] = "$k = :$k";
                 $binds[":$k"] = json_encode($v);
                 continue;

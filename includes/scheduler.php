@@ -419,10 +419,23 @@ class HL_Scheduler {
             $decoded = json_decode($promo['images'], true);
             if (is_array($decoded)) $images = $decoded;
         }
+        $videos = [];
+        if (!empty($promo['videos'])) {
+            $decoded = json_decode($promo['videos'], true);
+            if (is_array($decoded)) $videos = $decoded;
+        }
 
-        // Prefer a single photo (logo) with caption so we can pin that message.
+        // The "primary" message carries the caption and is the one we pin. We
+        // prefer a photo (logo) so the pinned message shows the business at a
+        // glance; if there's no logo but there is a video, the video leads.
         if ($logo !== '') {
             $resp = $this->tg->sendPhoto($chat, $logo, $text);
+            if (!empty($images)) $this->tg->sendMediaGroup($chat, $images);
+            foreach ($videos as $v) { $this->tg->sendVideo($chat, $v); }
+        } elseif (!empty($videos)) {
+            $resp = $this->tg->sendVideo($chat, $videos[0], $text);
+            for ($i = 1; $i < count($videos); $i++) { $this->tg->sendVideo($chat, $videos[$i]); }
+            if (!empty($images)) $this->tg->sendMediaGroup($chat, $images);
         } elseif (!empty($images)) {
             $this->tg->sendMediaGroup($chat, $images);
             $resp = $this->tg->sendMessage($chat, $text);
@@ -498,21 +511,45 @@ class HL_Scheduler {
         return self::renderPostText($promo);
     }
 
+    // Turn a phrase into a single CamelCase #hashtag (e.g. "New York" -> #NewYork,
+    // "Food & Drink" -> #FoodDrink). Returns '' if nothing usable is left.
+    public static function hashtagify($s) {
+        $s = preg_replace('/[^\p{L}\p{N}]+/u', ' ', (string) $s);
+        $parts = array_filter(explode(' ', trim($s)), 'strlen');
+        $out = '';
+        foreach ($parts as $p) { $out .= mb_convert_case($p, MB_CASE_TITLE, 'UTF-8'); }
+        return $out === '' ? '' : '#' . $out;
+    }
+
     // Public + static so the bot can render an identical preview before submit
     // (single source of truth for how a promotion looks in the group).
     public static function renderPostText($promo) {
         $e = function ($s) { return htmlspecialchars((string) $s, ENT_QUOTES, 'UTF-8'); };
+
+        $divider = str_repeat("\xE2\x94\x81", 18);   // ━ x18
+        $name = mb_strtoupper((string) ($promo['business_name'] ?: 'Featured Business'), 'UTF-8');
+
         $lines = [];
-        $lines[] = "\xF0\x9F\x93\xA2 <b>" . $e($promo['business_name'] ?: 'Featured Business') . "</b>";
-        if (!empty($promo['business_category'])) $lines[] = $e($promo['business_category']);
+        $lines[] = $divider;
+        $lines[] = "\xF0\x9F\x93\xA2 <b>" . $e($name) . "</b>";
+        $lines[] = $divider;
         $lines[] = '';
-        if (!empty($promo['description'])) { $lines[] = $e($promo['description']); $lines[] = ''; }
-        if (!empty($promo['phone']))   $lines[] = "\xF0\x9F\x93\x9E " . $e($promo['phone']);
-        if (!empty($promo['website'])) $lines[] = "\xF0\x9F\x8C\x90 " . $e($promo['website']);
-        if (!empty($promo['social']))  $lines[] = "\xF0\x9F\x94\x97 " . $e($promo['social']);
-        if (!empty($promo['address'])) $lines[] = "\xF0\x9F\x93\x8D " . $e($promo['address']);
-        if (!empty($promo['hours']))   $lines[] = "\xF0\x9F\x95\x92 " . $e($promo['hours']);
-        if (!empty($promo['cta']))     { $lines[] = ''; $lines[] = "\xF0\x9F\x91\x89 " . $e($promo['cta']); }
+        if (!empty($promo['business_category'])) { $lines[] = "\xF0\x9F\x8F\xB7\xEF\xB8\x8F Category: " . $e($promo['business_category']); $lines[] = ''; }
+        if (!empty($promo['description']))       { $lines[] = "\xF0\x9F\x93\x9D " . $e($promo['description']); $lines[] = ''; }
+        if (!empty($promo['address'])) { $lines[] = "\xF0\x9F\x93\x8D Location: " . $e($promo['address']); $lines[] = ''; }
+        if (!empty($promo['phone']))   { $lines[] = "\xF0\x9F\x93\x9E Contact: " . $e($promo['phone']); $lines[] = ''; }
+        if (!empty($promo['website'])) { $lines[] = "\xF0\x9F\x8C\x90 " . $e($promo['website']); $lines[] = ''; }
+        if (!empty($promo['social']))  { $lines[] = "\xF0\x9F\x94\x97 " . $e($promo['social']); $lines[] = ''; }
+        if (!empty($promo['hours']))   { $lines[] = "\xF0\x9F\x95\x92 " . $e($promo['hours']); $lines[] = ''; }
+        if (!empty($promo['cta']))     { $lines[] = "\xF0\x9F\x91\x89 " . $e($promo['cta']); $lines[] = ''; }
+
+        // Hashtags: category + location + the always-on brand tag.
+        $tags = [];
+        if (!empty($promo['business_category'])) { $t = self::hashtagify($promo['business_category']); if ($t) $tags[] = $t; }
+        if (!empty($promo['address']))           { $t = self::hashtagify($promo['address']);           if ($t) $tags[] = $t; }
+        $tags[] = '#HabeshaList';
+        $lines[] = implode(' ', array_unique($tags));
+
         return trim(implode("\n", $lines));
     }
 }
