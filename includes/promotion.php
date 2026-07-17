@@ -178,7 +178,7 @@ function promoHandlePayMethod($userId, $method, $state) {
     $price = promoFmtPrice($data['price'] ?? 0);
 
     if ($method === 'card') {
-        $key = $db->getSetting('stripe_key', $config['stripe_key']);
+        $key = preg_replace('/\s+/', '', (string) $db->getSetting('stripe_key', $config['stripe_key']));
         // No key, or the Stripe helper file isn't present yet -> manual fallback.
         if (empty($key) || !function_exists('hl_stripe_create_session')) {
             $db->setState($userId, 'promo_payment', $data);
@@ -220,7 +220,18 @@ function promoHandlePayMethod($userId, $method, $state) {
         );
 
         if (empty($sess['url'])) {
-            error_log('promo stripe create session failed: ' . ($sess['error'] ?? 'unknown'));
+            $stripeErr = $sess['error'] ?? 'unknown';
+            error_log('promo stripe create session failed: ' . $stripeErr);
+            // Tell the admin exactly what Stripe said, so a key problem is obvious
+            // and fixable without guesswork (users never see this).
+            $keyHint = substr($key, 0, 8);
+            foreach (($config['admin_ids'] ?? []) as $aid) {
+                $tg->sendMessage((int) $aid,
+                    "\xE2\x9A\xA0\xEF\xB8\x8F <b>Card checkout failed for a user.</b>\n\n" .
+                    "Stripe said: <b>" . htmlspecialchars($stripeErr, ENT_QUOTES) . "</b>\n" .
+                    "Key in use starts with: <code>" . htmlspecialchars($keyHint, ENT_QUOTES) . "...</code>\n\n" .
+                    "Fix it on the panel Keys page - paste your SECRET key (sk_live_ or sk_test_). The panel now verifies the key with Stripe before saving.");
+            }
             $db->setState($userId, 'promo_payment', $data);
             $tg->sendInlineButtons($userId,
                 "\xE2\x9A\xA0\xEF\xB8\x8F Sorry, card checkout is temporarily unavailable. Please pay with Zelle or Cash App instead and I'll get you sorted.",
@@ -282,7 +293,7 @@ function promoCheckCard($userId, $state) {
     $sessionId = $data['_stripe_session'] ?? '';
     if ($sessionId === '') { promoShowPayment($userId, $data); return; }
 
-    $key = $db->getSetting('stripe_key', $config['stripe_key']);
+    $key = preg_replace('/\s+/', '', (string) $db->getSetting('stripe_key', $config['stripe_key']));
     $session = hl_stripe_get_session($key, $sessionId);
 
     if (hl_stripe_session_paid($session)) {

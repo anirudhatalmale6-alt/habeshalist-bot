@@ -68,6 +68,36 @@ function hl_verify_bot_token($token) {
     return [null, $desc];
 }
 
+// Verify a Stripe SECRET key by calling Stripe (GET /v1/balance). Returns
+// [true, null] if the key works, or [false, error] with Stripe's own message.
+// This is what a Publishable key or a typo'd/expired key fails.
+function hl_verify_stripe_key($key) {
+    $key = preg_replace('/\s+/', '', $key);
+    $url = 'https://api.stripe.com/v1/balance';
+    $resp = false; $http = 0;
+    if (function_exists('curl_init')) {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 12,
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_USERPWD => $key . ':',   // secret key is the basic-auth username
+        ]);
+        $resp = curl_exec($ch);
+        $http = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+    }
+    if ($resp === false) {
+        return [false, 'Could not reach Stripe to verify the key. Try again in a moment.'];
+    }
+    $j = json_decode($resp, true);
+    if ($http === 200 && is_array($j) && ($j['object'] ?? '') === 'balance') {
+        return [true, null];
+    }
+    $desc = (is_array($j) && !empty($j['error']['message'])) ? $j['error']['message'] : 'Stripe rejected this key.';
+    return [false, $desc];
+}
+
 $flash = null; $flashType = 'ok';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -100,23 +130,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $flash = 'Saved and verified - this token belongs to @' . $uname . '. Note: after switching to a different bot I need to re-point the webhook to it (just message me).';
                 }
             }
-        } else {
-            if ($meta['validate'] === 'stripe' && preg_match('/^pk_(live|test)_/', $new)) {
+        } elseif ($meta['validate'] === 'stripe') {
+            $new = preg_replace('/\s+/', '', $new);   // strip any pasted whitespace
+            if (preg_match('/^pk_(live|test)_/', $new)) {
                 // HARD stop: a Publishable key (pk_) cannot create charges. This is
                 // the single most common mistake, so refuse it and say exactly which
                 // key to paste instead.
                 $flash = 'Not saved - that is your Publishable key (pk_...). Card charges need your SECRET key, which starts with sk_live_ (or sk_test_). In Stripe: Developers > API keys > Secret key > Reveal, then paste that here.';
                 $flashType = 'err';
-            } elseif ($meta['validate'] === 'stripe' && !preg_match('/^(sk|rk)_(live|test)_/', $new)) {
-                // soft warning only - still saved
-                $blob = hl_encrypt_secret($new, $appKey);
-                if ($blob === false) { $flash = 'Encryption failed on this server.'; $flashType = 'err'; }
-                else { hl_set_setting($meta['setkey'], $blob); $flash = 'Saved (heads up: that did not look like a standard sk_/rk_ Stripe secret key - double-check it if payments misbehave).'; }
             } else {
-                $blob = hl_encrypt_secret($new, $appKey);
-                if ($blob === false) { $flash = 'Encryption failed on this server.'; $flashType = 'err'; }
-                else { hl_set_setting($meta['setkey'], $blob); $flash = $meta['label'] . ' saved securely.'; }
+                // Verify the key against Stripe BEFORE saving, so a bad/expired key
+                // (the exact thing that produced "checkout unavailable") is caught
+                // here instead of silently failing later for a paying user.
+                list($ok, $err) = hl_verify_stripe_key($new);
+                if (!$ok) {
+                    $flash = 'Not saved - Stripe rejected this key: ' . $err . ' | Use your SECRET key (sk_live_ or sk_test_) from Stripe > Developers > API keys.';
+                    $flashType = 'err';
+                } else {
+                    $blob = hl_encrypt_secret($new, $appKey);
+                    if ($blob === false) { $flash = 'Encryption failed on this server.'; $flashType = 'err'; }
+                    else { hl_set_setting($meta['setkey'], $blob); $flash = 'Stripe key saved and verified with Stripe - card payments are ready.'; }
+                }
             }
+        } else {
+            $blob = hl_encrypt_secret($new, $appKey);
+            if ($blob === false) { $flash = 'Encryption failed on this server.'; $flashType = 'err'; }
+            else { hl_set_setting($meta['setkey'], $blob); $flash = $meta['label'] . ' saved securely.'; }
         }
     }
 }
