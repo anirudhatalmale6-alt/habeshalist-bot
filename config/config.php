@@ -137,24 +137,25 @@ $config = [
         ],
 
         // Business of the Week - its OWN main-menu button (NOT part of the
-        // package picker above). Strictly one exclusive business per week,
-        // featured & pinned for the full 7 days. Bookable up to 4 weeks ahead.
-        // Reuses the same payment / ad form / approval engine as the packages.
+        // package picker above). Strictly one exclusive business per week, with
+        // a fresh featured post EVERY day for 7 consecutive days, each pinned to
+        // the top on its day. Bookable up to 4 weeks ahead. Reuses the same
+        // payment / ad form / approval engine as the packages.
         'botw' => [
             'name' => 'Business of the Week',
             'emoji' => "\xF0\x9F\x8F\x86",
             'default_price' => 75,
-            'posts_total' => 1,
+            'posts_total' => 7,         // one featured post per day for a week
             'posts_per_week' => null,
             'duration_days' => 7,
             'pinned' => true,
             'exclusive' => true,        // only one business can hold the week
             'booking_weeks_ahead' => 4, // users can book up to 4 weeks in advance
-            'summary' => "Be THE featured business of the week in the HabeshaList Telegram Group. Only one business is featured each week, so you get the spotlight all to yourself - a pinned feature post kept at the top of the group for all 7 days.",
+            'summary' => "Be THE featured business of the week in the HabeshaList Telegram Group. Only one business is featured each week, so you get the spotlight all to yourself - a fresh featured post every day for 7 consecutive days, each pinned to the top of the group on its day.",
             'features' => [
                 'Exclusive - only 1 business per week',
-                'Featured & pinned for the full 7 days',
-                'Top-of-group visibility all week',
+                '7 daily featured posts (one each day)',
+                'Each post pinned to the top on its day',
                 'Book up to 4 weeks in advance',
             ],
         ],

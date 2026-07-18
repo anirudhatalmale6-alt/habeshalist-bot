@@ -1449,7 +1449,7 @@ function promoDateGrid($userId, $data, $ym = null, $editMsgId = null) {
     $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'promo_preview']];
 
     $note = ($key === 'botw')
-        ? "Pick the day your Business of the Week feature should start. It stays pinned for the full 7 days."
+        ? "Pick the day your Business of the Week feature should start. We'll post it once a day for 7 consecutive days from then, each pinned to the top on its day."
         : "Tap the date you'd like your post to go out:";
     $body = "\xF0\x9F\x93\x85 <b>Choose a date</b>\n\n" . $note;
 
@@ -1532,7 +1532,14 @@ function promoFinalizeSingle($userId, $data, $hm) {
     $date = $data['_sched_date'] ?? '';
     $data['schedule'] = ['mode' => 'single', 'date' => $date, 'time' => $hm];
     $data['start_date'] = $date;
-    $data['end_date'] = $date;
+    // Business of the Week runs for 7 consecutive days, so its plan window ends
+    // 6 days after the start; a one-time post starts and ends the same day.
+    if (($data['package_key'] ?? '') === 'botw' && $date !== '') {
+        $end = DateTime::createFromFormat('Y-m-d', $date, promoSchedTz());
+        $data['end_date'] = ($end instanceof DateTime) ? $end->modify('+6 day')->format('Y-m-d') : $date;
+    } else {
+        $data['end_date'] = $date;
+    }
     unset($data['_sched_date'], $data['_sched_ctx']);
     promoSchedConfirm($userId, $data);
 }
@@ -1681,7 +1688,9 @@ function promoSchedConfirm($userId, $data) {
     $isResched = !empty($data['resched_id']);
 
     $extra = '';
-    if (($data['schedule']['mode'] ?? '') === 'recurring') {
+    if (($data['package_key'] ?? '') === 'botw') {
+        $extra = "\n\nWe'll post your feature once a day for <b>7 consecutive days</b> starting then - each post pinned to the top of the group on its day.";
+    } elseif (($data['schedule']['mode'] ?? '') === 'recurring') {
         $extra = "\n\nWe'll auto-schedule up to <b>{$total}</b> posts on these days" .
             (($data['package_key'] ?? '') === 'yearly'
                 ? ", opening one month at a time (the next month unlocks automatically as it gets close)."

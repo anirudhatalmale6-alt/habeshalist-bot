@@ -133,14 +133,19 @@ $bpid = $db->createPromotion($UID, [
     'package_key'=>'botw','price'=>50,'payment_status'=>'paid','business_name'=>'Week Star',
     'business_category'=>'Retail','description'=>'Featured business','phone'=>'555','logo'=>'LOGO_B',
     'images'=>[], 'videos'=>[],
-    'posts_total'=>1,'posts_used'=>0,'status'=>'pending_review',
+    'posts_total'=>7,'posts_used'=>0,'status'=>'pending_review',
     'start_date'=>$in2,'end_date'=>$in2,
     'schedule'=>['mode'=>'single','date'=>$in2,'time'=>'09:00'],
 ]);
 promoModerate($ADMIN, $bpid, 'approve');
 $up = $db->getUpcomingPosts($bpid, 20, $today);
-check('BOTW booked immediately on approval', count($up) === 1);
-check('BOTW booking is flagged to pin', $up && (int)$up[0]['pin'] === 1);
+// Business of the Week now books one post a day for 7 consecutive days.
+check('BOTW booked 7 daily posts on approval', count($up) === 7);
+$allPinned = $up && count($up) === 7;
+foreach ($up as $u) { if ((int)$u['pin'] !== 1) $allPinned = false; }
+check('every BOTW daily post is flagged to pin', $allPinned);
+$botwDates = array_map(function($u){ return $u['post_date']; }, $up);
+check('BOTW dates are 7 distinct consecutive days', count(array_unique($botwDates)) === 7);
 // move it into the past and run the engine
 $pdo = new SQLite3($dbPath);
 $pdo->exec("UPDATE scheduled_posts SET post_date='" . SQLite3::escapeString($today) . "', post_time='00:01' WHERE promotion_id=" . (int)$bpid);

@@ -136,20 +136,6 @@ class HL_Scheduler {
         $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
         return ((int) ($row['c'] ?? 0)) === 0;
     }
-    private function botwWeekTaken($isoWeek, $exceptPromoId) {
-        // Compare ISO weeks in PHP (SQLite's %W is not the ISO week).
-        $stmt = $this->db->prepare("SELECT post_date FROM scheduled_posts
-            WHERE package_key='botw' AND promotion_id<>:pid AND status IN ('scheduled','posted')");
-        $stmt->bindValue(':pid', $exceptPromoId, SQLITE3_INTEGER);
-        $res = $stmt->execute();
-        $tz = $this->tz();
-        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
-            $d = DateTime::createFromFormat('Y-m-d', $r['post_date'], $tz);
-            if ($d instanceof DateTime && $d->format('o-W') === $isoWeek) return true;
-        }
-        return false;
-    }
-
     // Dispatch: honour the schedule the user picked in the bot. If a promotion
     // has no user schedule (e.g. created straight from the admin panel), fall
     // back to the automatic spread so nothing is ever left unposted.
@@ -220,27 +206,66 @@ class HL_Scheduler {
         return ((int) ($row['c'] ?? 0)) > 0;
     }
 
-    // ---- user-chosen: a single dated post (one-time, and Business of the Week) ----
+    // ---- user-chosen: a single dated post (one-time), or the 7-day Business of the Week ----
     private function bookSingle($promo, $schedule) {
         $key = $promo['package_key'] ?: 'one_time';
-        $tz = $this->tz();
         $date = substr($schedule['date'], 0, 10);
         $time = $this->normTime($schedule['time'] ?? '12:00');
+
+        // Business of the Week is a 7-day feature: one post a day for 7
+        // consecutive days from the chosen start, each pinned on its own day.
+        if ($key === 'botw') {
+            $this->bookBotwWeek($promo, $date, $time);
+            return;
+        }
 
         if ($this->hasBookingAt($promo['id'], $date, $time)) {
             $this->log[] = "promo {$promo['id']}: single already booked"; return;
         }
+        $this->insertBooking($promo, $date, $this->slotLabelFor($time), $time, 0, 0);
+        $this->log[] = "promo {$promo['id']} ({$key}): booked single {$date} {$time}";
+    }
 
-        $pin = 0; $pinHours = 0;
-        if ($key === 'botw') {
-            $d = DateTime::createFromFormat('Y-m-d', $date, $tz);
-            if ($d instanceof DateTime && $this->botwWeekTaken($d->format('o-W'), $promo['id'])) {
-                $this->log[] = "promo {$promo['id']} (botw): chosen week already taken"; return;
+    // Business of the Week: book one post a day for 7 consecutive days starting
+    // on $startDate, each at $time and each pinned on its own day (24h, so the
+    // pin naturally rolls to the newest post each day). Idempotent (safe to
+    // re-run - it skips days already booked for this promo) and exclusive: if
+    // another Business of the Week already holds any of those 7 days, the whole
+    // booking is skipped so two features never overlap.
+    private function bookBotwWeek($promo, $startDate, $time) {
+        $tz = $this->tz();
+        $start = DateTime::createFromFormat('Y-m-d', $startDate, $tz);
+        if (!($start instanceof DateTime)) { $this->log[] = "promo {$promo['id']} (botw): bad start date {$startDate}"; return; }
+        $start->setTime(0, 0);
+
+        // Collect the 7 target dates, then enforce exclusivity across all of them.
+        $dates = [];
+        $cur = clone $start;
+        for ($i = 0; $i < 7; $i++) { $dates[] = $cur->format('Y-m-d'); $cur->modify('+1 day'); }
+        foreach ($dates as $d) {
+            if ($this->botwDayTaken($d, $promo['id'])) {
+                $this->log[] = "promo {$promo['id']} (botw): {$d} already held by another feature - span skipped"; return;
             }
-            $pin = 1; $pinHours = 24 * 7;
         }
-        $this->insertBooking($promo, $date, $this->slotLabelFor($time), $time, $pin, $pinHours);
-        $this->log[] = "promo {$promo['id']} ({$key}): booked single {$date} {$time}" . ($pin ? ' + pinned' : '');
+
+        $placed = 0;
+        foreach ($dates as $d) {
+            if ($this->hasBookingAt($promo['id'], $d, $time)) continue;   // idempotent re-run
+            $this->insertBooking($promo, $d, $this->slotLabelFor($time), $time, 1, 24);
+            $placed++;
+        }
+        $this->log[] = "promo {$promo['id']} (botw): booked {$placed} daily posts from {$startDate} at {$time}, each pinned 24h";
+    }
+
+    // True if another Business of the Week promotion already occupies this day.
+    private function botwDayTaken($date, $exceptPromoId) {
+        $stmt = $this->db->prepare("SELECT COUNT(*) c FROM scheduled_posts
+            WHERE package_key='botw' AND promotion_id<>:pid AND post_date=:d
+              AND status IN ('scheduled','posted')");
+        $stmt->bindValue(':pid', (int) $exceptPromoId, SQLITE3_INTEGER);
+        $stmt->bindValue(':d', $date, SQLITE3_TEXT);
+        $row = $stmt->execute()->fetchArray(SQLITE3_ASSOC);
+        return ((int) ($row['c'] ?? 0)) > 0;
     }
 
     // ---- user-chosen: recurring weekly slots (monthly & yearly) ----
@@ -323,24 +348,26 @@ class HL_Scheduler {
             if ($sd instanceof DateTime && $sd > $start) { $start->setTimestamp($sd->getTimestamp()); }
         }
 
-        // Business of the Week: exactly one exclusive, pinned post; holds the week.
+        // Business of the Week: 7 consecutive daily posts, each pinned on its
+        // day. Find the first start day whose whole 7-day span is free of any
+        // other feature, then book the week from there at the morning slot time.
         if ($key === 'botw') {
+            $time = $this->normTime($this->getSetting('sched_slot_morning'));
             $cur = clone $start;
             for ($d = 0; $d < $horizon; $d++) {
-                $date = $cur->format('Y-m-d');
-                $isoWeek = $cur->format('o-W');
-                if (!$this->botwWeekTaken($isoWeek, $promo['id'])) {
-                    foreach ($slots as $slot) {
-                        if ($this->slotFree($date, $slot)) {
-                            $this->insertBooking($promo, $date, $slot, null, 1, 24 * 7);
-                            $this->log[] = "promo {$promo['id']} (botw): booked {$date} {$slot}, pinned 7d";
-                            return;
-                        }
-                    }
+                $spanFree = true;
+                $probe = clone $cur;
+                for ($i = 0; $i < 7; $i++) {
+                    if ($this->botwDayTaken($probe->format('Y-m-d'), $promo['id'])) { $spanFree = false; break; }
+                    $probe->modify('+1 day');
+                }
+                if ($spanFree) {
+                    $this->bookBotwWeek($promo, $cur->format('Y-m-d'), $time);
+                    return;
                 }
                 $cur->modify('+1 day');
             }
-            $this->log[] = "promo {$promo['id']} (botw): no free exclusive week found in horizon";
+            $this->log[] = "promo {$promo['id']} (botw): no free 7-day span found in horizon";
             return;
         }
 
