@@ -1668,7 +1668,7 @@ function showMainMenu($userId, $name) {
             [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
             [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'callback_data' => 'botw']],
-            [['text' => "\xF0\x9F\x8E\x81 Invite &amp; Earn", 'callback_data' => 'invite']],
+            [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
             [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
         ]
