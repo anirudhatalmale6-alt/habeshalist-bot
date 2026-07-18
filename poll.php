@@ -115,6 +115,26 @@ $runScheduler = function () use ($config, $tg) {
 $runScheduler();
 $lastSched = time();
 
+// Invite & Earn: every few minutes, settle referrals past their window and DM
+// any inviter who just reached a reward milestone. Fully defensive - a hiccup
+// here (or the feature being off) never affects the poller or the scheduler.
+$REF_EVERY = 300;
+$runReferralSweep = function () use ($tg) {
+    global $referral;
+    if (!$referral) return;
+    try {
+        foreach ($referral->sweepNewRewards() as $hit) {
+            if (function_exists('inviteRewardUnlocked')) {
+                inviteRewardUnlocked($hit['telegram_id'], $hit['reward']);
+            }
+        }
+    } catch (Throwable $e) {
+        error_log('poll.php referral sweep failed: ' . $e->getMessage());
+    }
+};
+$runReferralSweep();
+$lastRef = time();
+
 $deadline = time() + $MAX_RUN_SECONDS;
 
 while (time() < $deadline) {
@@ -123,6 +143,10 @@ while (time() < $deadline) {
     if (time() - $lastSched >= $SCHED_EVERY) {
         $runScheduler();
         $lastSched = time();
+    }
+    if (time() - $lastRef >= $REF_EVERY) {
+        $runReferralSweep();
+        $lastRef = time();
     }
 
     $remaining = $deadline - time();

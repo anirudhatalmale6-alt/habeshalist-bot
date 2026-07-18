@@ -9,10 +9,13 @@ require_once __DIR__ . '/includes/promotion.php';
 // than crash the whole poller on a missing include.
 if (is_file(__DIR__ . '/includes/stripe.php')) require_once __DIR__ . '/includes/stripe.php';
 require_once __DIR__ . '/includes/scheduler.php'; // for HL_Scheduler::renderPostText() preview
+require_once __DIR__ . '/includes/referral.php';  // Invite & Earn engine + screens
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
 if (!isset($tg)) $tg = new Telegram($config['bot_token']);
+// Invite & Earn engine (own SQLite handle to the same db, like HL_Scheduler).
+if (!isset($referral)) { try { $referral = new HL_Referral($db->path()); } catch (\Throwable $e) { $referral = null; } }
 
 // Only dispatch incoming updates when served over a real HTTP request. When
 // this file is required from poll.php (cron) or from CLI tests there is no HTTP
@@ -144,6 +147,17 @@ function handleCallbackQuery($query) {
     if ($data === 'promote') { handleAction($userId, 'promote'); return; }
     if ($data === 'botw') { handleAction($userId, 'botw'); return; }
     if ($data === 'contact') { handleAction($userId, 'contact'); return; }
+
+    // ---- Invite & Earn ----
+    if ($data === 'invite')       { handleAction($userId, 'invite'); return; }
+    if ($data === 'inv_link')     { inviteShowLink($userId); return; }
+    if ($data === 'inv_progress') { inviteShowProgress($userId); return; }
+    if ($data === 'inv_rewards')  { inviteShowRewards($userId); return; }
+    if ($data === 'inv_myrewards'){ inviteViewMyRewards($userId); return; }
+    if (strpos($data, 'inv_claim_') === 0) { inviteClaimReward($userId, (int) substr($data, 10)); return; }
+    if (strpos($data, 'inv_start_') === 0) { inviteRewardStartMode($userId, (int) substr($data, 10), 'start'); return; }
+    if (strpos($data, 'inv_save_')  === 0) { inviteRewardStartMode($userId, (int) substr($data, 9), 'save'); return; }
+    if (strpos($data, 'inv_date_')  === 0) { inviteRewardChooseDate($userId, (int) substr($data, 9)); return; }
 
     // ---- Promote My Business ----
 
@@ -466,7 +480,7 @@ function handleCallbackQuery($query) {
 // ============================================================
 
 function handleMessage($msg) {
-    global $tg, $db, $config;
+    global $tg, $db, $config, $referral;
 
     $chatId = $msg['chat']['id'];
     $userId = $msg['from']['id'];
@@ -480,12 +494,22 @@ function handleMessage($msg) {
 
         $user = $db->getUser($userId);
 
+        // Is this deep-link a referral code (not one of our action keywords)?
+        $isRefCode = ($param !== '' && $referral && $referral->looksLikeCode($param) && $referral->codeOwner($param));
+
         if (!$user) {
-            startRegistration($userId, $param);
+            // New user arriving via a referral link: remember who invited them so
+            // we can attribute once they finish registering, and land them on the
+            // Invite & Earn screen afterward.
+            startRegistration($userId, $isRefCode ? 'invite' : $param, $isRefCode ? $param : '');
             return;
         }
 
-        if ($param) {
+        if ($isRefCode) {
+            // Existing members can't be "referred" - codes only apply to new users.
+            $tg->sendMessage($userId, "\xF0\x9F\x91\x8B You're already a HabeshaList member, so this invite link doesn't apply to your account - but you can invite your own friends and earn rewards!");
+            showMainMenu($userId, $user['name']);
+        } elseif ($param) {
             handleAction($userId, $param);
         } else {
             showMainMenu($userId, $user['name']);
@@ -576,7 +600,7 @@ function handleMessage($msg) {
 // ============================================================
 
 function handleStateInput($userId, $msg) {
-    global $tg, $db, $config;
+    global $tg, $db, $config, $referral;
 
     $state = $db->getState($userId);
     $text = trim($msg['text'] ?? '');
@@ -585,6 +609,12 @@ function handleStateInput($userId, $msg) {
     // Route all Promote-My-Business states to the promotion module
     if (strpos($state['state'], 'promo_') === 0) {
         promoHandleStateInput($userId, $msg, $state);
+        return;
+    }
+
+    // Invite & Earn: user typing a custom reward start date.
+    if ($state['state'] === 'inv_reward_date') {
+        inviteRewardSaveDate($userId, $text, $state);
         return;
     }
 
@@ -631,6 +661,14 @@ function handleStateInput($userId, $msg) {
             $reg = registerOnWebsite($stateData['name'], $stateData['phone'], $stateData['email']);
             if ($reg && !empty($reg['osclass_user_id'])) {
                 $db->setOsclassUserId($userId, $reg['osclass_user_id']);
+            }
+
+            // Invite & Earn: if this user arrived via a referral link, attribute
+            // the referral now that registration is complete, and let the inviter
+            // know (plus check whether they just hit a reward milestone).
+            $refCode = $stateData['ref_code'] ?? '';
+            if ($refCode !== '' && $referral) {
+                referralAttributeNewUser($userId, $refCode, $stateData);
             }
 
             $tg->sendMessage($userId,
@@ -929,6 +967,30 @@ function handlePhotoMessage($userId, $msg) {
 // ACTION ROUTER
 // ============================================================
 
+// Attribute a just-registered user to their inviter and notify the inviter.
+// Called after createUser() when the user arrived via a referral link.
+function referralAttributeNewUser($userId, $refCode, $stateData) {
+    global $tg, $referral;
+    if (!$referral) return;
+    try {
+        $referrerId = $referral->codeOwner($refCode);
+        list($ok, $why) = $referral->attribute(
+            $userId, $refCode,
+            $stateData['name'] ?? '', $stateData['phone'] ?? '', $stateData['email'] ?? ''
+        );
+        if (!$ok || !$referrerId) return;
+        // Tell the inviter (best-effort - they've DM'd the bot before, so allowed).
+        $friend = $stateData['name'] ?? 'A friend';
+        $note = ($why === 'flagged')
+            ? "\xF0\x9F\x91\x80 A new sign-up used your invite link but needs a quick review before it counts."
+            : "\xF0\x9F\x8E\x89 <b>{$friend}</b> just joined HabeshaList using your invite link! It'll count toward your rewards once they settle in.";
+        $tg->sendInlineButtons($referrerId, $note,
+            [[['text' => "\xF0\x9F\x93\x88 My Progress", 'callback_data' => 'inv_progress']]]);
+        // Did that push them over a milestone (e.g. when the settle window is 0)?
+        foreach ($referral->checkMilestones($referrerId) as $rw) { inviteRewardUnlocked($referrerId, $rw); }
+    } catch (\Throwable $e) { /* never block registration on referral errors */ }
+}
+
 function handleAction($userId, $action) {
     global $tg, $db, $config;
 
@@ -956,6 +1018,13 @@ function handleAction($userId, $action) {
             break;
         case 'contact':
             showContactInfo($userId);
+            break;
+        case 'invite':
+            if (!$db->getUser($userId)) {
+                startRegistration($userId, 'invite');
+                break;
+            }
+            inviteEarnHome($userId);
             break;
         case 'paid':
             // Return from Stripe checkout (success) - verify & continue.
@@ -1599,6 +1668,7 @@ function showMainMenu($userId, $name) {
             [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
             [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'callback_data' => 'botw']],
+            [['text' => "\xF0\x9F\x8E\x81 Invite &amp; Earn", 'callback_data' => 'invite']],
             [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
         ]
@@ -1648,6 +1718,7 @@ function sendGroupButtons($chatId) {
             [['text' => "\xF0\x9F\x93\x9D Post to Website (FREE)", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
             [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'url' => "https://t.me/{$botUsername}?start=botw"]],
+            [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'url' => "https://t.me/{$botUsername}?start=contact"]],
         ]
     );
@@ -1748,9 +1819,9 @@ function restoreStateUI($userId, $stateName, $stateData) {
 // HELPERS
 // ============================================================
 
-function startRegistration($userId, $intendedAction = '') {
+function startRegistration($userId, $intendedAction = '', $refCode = '') {
     global $tg, $db;
-    $db->setState($userId, 'reg_name', ['intended_action' => $intendedAction]);
+    $db->setState($userId, 'reg_name', ['intended_action' => $intendedAction, 'ref_code' => $refCode]);
     $tg->sendMessage($userId,
         "\xF0\x9F\x91\x8B Welcome to HabeshaList.com!\n\n" .
         "Before you can post, let's create your free account.\n\n" .

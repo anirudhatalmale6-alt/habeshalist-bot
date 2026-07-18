@@ -117,6 +117,7 @@ function hl_nav_items() {
             ['slug' => 'calendar',   'label' => 'Calendar & Slots','href' => 'calendar.php',   'icon' => "\xF0\x9F\x93\x85"],
             ['slug' => 'payments',   'label' => 'Payments',        'href' => 'payments.php',   'icon' => "\xF0\x9F\x92\xB3"],
             ['slug' => 'businesses', 'label' => 'Businesses',      'href' => 'businesses.php', 'icon' => "\xF0\x9F\x8F\xA2"],
+            ['slug' => 'invite',     'label' => 'Invite & Earn',   'href' => 'invite.php',     'icon' => "\xF0\x9F\x8E\x81"],
             ['slug' => 'users',      'label' => 'Users',           'href' => 'users.php',      'icon' => "\xF0\x9F\x91\xA5"],
         ]],
         ['sec' => 'Settings', 'items' => [
