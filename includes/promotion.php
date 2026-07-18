@@ -1381,13 +1381,30 @@ function promoSchedStart($userId, $state) {
 // shown greyed as a no-op, and the arrows only appear when there's a reachable
 // month in that direction.
 function promoDateGrid($userId, $data, $ym = null, $editMsgId = null) {
-    global $tg;
+    global $tg, $db;
     $key = $data['package_key'] ?? 'one_time';
     $tz = promoSchedTz();
     $today = new DateTime('now', $tz); $today->setTime(0, 0);
 
     $days = ($key === 'botw') ? 28 : 30;   // botw is bookable up to 4 weeks out
     $maxDate = (clone $today)->modify('+' . ($days - 1) . ' day');
+
+    // Business of the Week owns a whole week exclusively, so a start day is only
+    // bookable when none of its 7-day run is already held by another BOTW ad.
+    // Pre-load the taken days once, then a start day is "free" if its span is clear.
+    $botwFree = function (DateTime $d) { return true; };
+    if ($key === 'botw' && $db) {
+        $spanEnd = (clone $maxDate)->modify('+6 day');   // last start's run reaches here
+        $taken = $db->botwOccupiedDays($today->format('Y-m-d'), $spanEnd->format('Y-m-d'),
+            $data['id'] ?? null);
+        $botwFree = function (DateTime $start) use ($taken) {
+            for ($i = 0; $i < 7; $i++) {
+                $day = (clone $start)->modify("+{$i} day")->format('Y-m-d');
+                if (!empty($taken[$day])) return false;
+            }
+            return true;
+        };
+    }
 
     // Month being shown. Clamp so we never render a month with no bookable day.
     $month = null;
@@ -1434,10 +1451,13 @@ function promoDateGrid($userId, $data, $ym = null, $editMsgId = null) {
     for ($day = 1; $day <= $daysInMonth; $day++) {
         $d = DateTime::createFromFormat('Y-m-d', $month->format('Y-m-') . sprintf('%02d', $day), $tz);
         $d->setTime(0, 0);
-        if ($isTappable($d)) {
+        if ($isTappable($d) && $botwFree($d)) {
             $row[] = ['text' => (string) $day, 'callback_data' => 'pschd_' . $d->format('Ymd')];
+        } elseif ($isTappable($d) && $key === 'botw') {
+            // In-window but that week is already booked by another Business of the Week.
+            $row[] = ['text' => "\xF0\x9F\x9A\xAB", 'callback_data' => 'pnop'];   // no-entry = week taken
         } else {
-            $row[] = ['text' => "\xC2\xB7", 'callback_data' => 'pnop'];   // middot = not selectable
+            $row[] = ['text' => "\xC2\xB7", 'callback_data' => 'pnop'];   // middot = outside window
         }
         if (count($row) === 7) { $rows[] = $row; $row = []; }
     }
@@ -1449,7 +1469,7 @@ function promoDateGrid($userId, $data, $ym = null, $editMsgId = null) {
     $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'promo_preview']];
 
     $note = ($key === 'botw')
-        ? "Pick the day your Business of the Week feature should start. We'll post it once a day for 7 consecutive days from then, each pinned to the top on its day."
+        ? "Pick the day your Business of the Week feature should start. We'll post it once a day for 7 consecutive days from then, each pinned to the top on its day.\n\n\xF0\x9F\x9A\xAB = that week is already taken by another business. \xC2\xB7 = outside the booking window."
         : "Tap the date you'd like your post to go out:";
     $body = "\xF0\x9F\x93\x85 <b>Choose a date</b>\n\n" . $note;
 
@@ -1472,10 +1492,22 @@ function promoCalendarNav($userId, $ym, $state, $editMsgId = null) {
 }
 
 function promoSchedPickDate($userId, $ymd, $state) {
-    global $db;
+    global $db, $tg;
     $data = $state['data'];
     $d = DateTime::createFromFormat('Ymd', $ymd, promoSchedTz());
     if (!$d) { promoDateGrid($userId, $data); return; }
+    $d->setTime(0, 0);
+    // Re-check availability for Business of the Week in case the week was booked
+    // by someone else between the calendar being shown and this tap.
+    if (($data['package_key'] ?? '') === 'botw' && $db) {
+        $spanEnd = (clone $d)->modify('+6 day');
+        $taken = $db->botwOccupiedDays($d->format('Y-m-d'), $spanEnd->format('Y-m-d'), $data['id'] ?? null);
+        if (!empty($taken)) {
+            $tg->sendMessage($userId, "\xE2\x9A\xA0\xEF\xB8\x8F Sorry, that week was just taken by another business. Please pick a different start date.");
+            promoDateGrid($userId, $data);
+            return;
+        }
+    }
     $data['_sched_date'] = $d->format('Y-m-d');
     $data['_sched_ctx'] = 'single';
     $db->setState($userId, 'promo_sched_time', $data);

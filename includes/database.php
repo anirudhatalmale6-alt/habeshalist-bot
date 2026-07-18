@@ -371,6 +371,26 @@ class Database {
         return $stmt->execute()->fetchArray(SQLITE3_ASSOC) ?: null;
     }
 
+    // Days inside [$fromYmd .. $toYmd] already held by a Business-of-the-Week
+    // booking (which owns a whole day exclusively). Returned as a set keyed by
+    // 'Y-m-d' => true so the bot's date picker can grey out weeks that are taken.
+    // Pass $exceptPromoId to ignore the caller's own promotion (so editing it
+    // doesn't see itself as a clash). Mirrors HL_Scheduler::botwDayTaken().
+    public function botwOccupiedDays($fromYmd, $toYmd, $exceptPromoId = null) {
+        $sql = "SELECT DISTINCT post_date FROM scheduled_posts
+                WHERE package_key='botw' AND status IN ('scheduled','posted')
+                  AND post_date >= :a AND post_date <= :b";
+        if ($exceptPromoId !== null) $sql .= " AND promotion_id <> :pid";
+        $stmt = $this->db->prepare($sql);
+        $stmt->bindValue(':a', $fromYmd, SQLITE3_TEXT);
+        $stmt->bindValue(':b', $toYmd, SQLITE3_TEXT);
+        if ($exceptPromoId !== null) $stmt->bindValue(':pid', (int) $exceptPromoId, SQLITE3_INTEGER);
+        $res = $stmt->execute();
+        $set = [];
+        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $set[$r['post_date']] = true; }
+        return $set;
+    }
+
     // Cancel a plan: stop all future (not-yet-posted) group posts. Anything
     // already posted stays up. No refund logic here - that's a manual decision.
     public function cancelPromotionSchedule($promoId) {
