@@ -1066,8 +1066,9 @@ function promoSubmit($userId, $state) {
 // posts exactly like a paid one.
 // ============================================================
 
-// Entry: user tapped "Redeem" on an earned reward. Starts the promo ad form for
-// the reward's package with payment bypassed, or hands a bundle to the team.
+// Entry: user tapped "Claim" on an earned reward. Sends the claim to the admin
+// for approval (it is NOT set up yet). On approval the user is invited to build
+// their ad via rewardBeginFulfillment().
 function inviteRedeemReward($userId, $rewardId) {
     global $tg, $db, $referral, $config;
     if (!$referral) { $tg->sendMessage($userId, "Sorry, rewards aren't available right now."); return; }
@@ -1076,11 +1077,62 @@ function inviteRedeemReward($userId, $rewardId) {
         $tg->sendMessage($userId, "Sorry, that reward could not be found.");
         return;
     }
+    // Already past the earned stage - tell the user where it stands.
     if ($rw['status'] !== 'earned') {
+        $where = [
+            'claimed'  => "is waiting for our team to approve it. We'll message you the moment it's approved.",
+            'approved' => "has been approved! Tap \"Set up\" on the Rewards screen to build your promotion.",
+            'redeemed' => "is already set up and scheduled - see My Dashboard.",
+            'rejected' => "wasn't approved. Please contact support if you have questions.",
+        ][$rw['status']] ?? "has already been handled.";
         $tg->sendInlineButtons($userId,
-            "\xE2\x9C\x85 You've already redeemed <b>" . htmlspecialchars($rw['title']) . "</b>.",
-            [[['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
+            "\xF0\x9F\x8E\x81 Your reward <b>" . htmlspecialchars($rw['title']) . "</b> " . $where,
+            [[['text' => "\xF0\x9F\x93\x8B My Rewards", 'callback_data' => 'inv_myrewards']],
              [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+        return;
+    }
+
+    // Move it to "claimed" (awaiting admin approval). One-shot guard.
+    if (!$referral->markRewardClaimed($rewardId)) {
+        $tg->sendInlineButtons($userId,
+            "That reward was just handled. Check My Rewards for its current status.",
+            [[['text' => "\xF0\x9F\x93\x8B My Rewards", 'callback_data' => 'inv_myrewards']]]);
+        return;
+    }
+
+    $tg->sendInlineButtons($userId,
+        "\xE2\x9C\x85 <b>Claim submitted!</b>\n\n" .
+        "\xF0\x9F\x8E\x81 " . htmlspecialchars($rw['title']) . "\n\n" .
+        "Our team will review and approve your reward shortly. As soon as it's approved, I'll message you here to set it up - you'll build your ad, pick a date and time, and it'll be scheduled just like a paid promotion.",
+        [[['text' => "\xF0\x9F\x93\x8B My Rewards", 'callback_data' => 'inv_myrewards']],
+         [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+
+    // Notify admins with inline Approve / Reject buttons.
+    if (function_exists('notifyAdminsRewardClaim')) notifyAdminsRewardClaim($userId, $rw);
+}
+
+// Fired when an admin APPROVES a reward claim (from the panel or a Telegram
+// button): begins fulfilment. Package-backed -> the ad form (payment skipped);
+// bundle -> handed to the team. Only runs on an 'approved' reward the user owns.
+function rewardBeginFulfillment($userId, $rewardId) {
+    global $tg, $db, $referral, $config;
+    if (!$referral) { $tg->sendMessage($userId, "Sorry, rewards aren't available right now."); return; }
+    $rw = $referral->reward($rewardId);
+    if (!$rw || (int) $rw['telegram_id'] !== (int) $userId) {
+        $tg->sendMessage($userId, "Sorry, that reward could not be found.");
+        return;
+    }
+    if ($rw['status'] === 'redeemed') {
+        $tg->sendInlineButtons($userId,
+            "\xE2\x9C\x85 <b>" . htmlspecialchars($rw['title']) . "</b> is already set up - see My Dashboard.",
+            [[['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']]]);
+        return;
+    }
+    if ($rw['status'] !== 'approved') {
+        // Not approved yet (still earned/claimed) or rejected.
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x8E\x81 <b>" . htmlspecialchars($rw['title']) . "</b> isn't ready to set up yet - it needs to be approved first.",
+            [[['text' => "\xF0\x9F\x93\x8B My Rewards", 'callback_data' => 'inv_myrewards']]]);
         return;
     }
 
@@ -1092,15 +1144,15 @@ function inviteRedeemReward($userId, $rewardId) {
     if (!$pkg) {
         $referral->markRewardRedeemed($rewardId, null);
         $tg->sendInlineButtons($userId,
-            "\xF0\x9F\x8E\x81 <b>" . htmlspecialchars($rw['title']) . "</b> redeemed!\n\n" .
+            "\xF0\x9F\x8E\x81 <b>" . htmlspecialchars($rw['title']) . "</b> is all set!\n\n" .
             "This reward bundles several perks, so our team will set it up for you and reach out shortly to arrange the details.",
             [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
         $user = $db->getUser($userId);
         $who = $user['name'] ?? ('ID ' . $userId);
         foreach (($config['admin_ids'] ?? []) as $aid) {
             $tg->sendMessage((int) $aid,
-                "\xF0\x9F\x8E\x81 <b>Reward redeemed - manual setup needed</b>\n\n" .
-                htmlspecialchars($who) . " (ID {$userId}) redeemed: <b>" . htmlspecialchars($rw['title']) . "</b>\n" .
+                "\xF0\x9F\x8E\x81 <b>Reward - manual setup needed</b>\n\n" .
+                htmlspecialchars($who) . " (ID {$userId}): <b>" . htmlspecialchars($rw['title']) . "</b>\n" .
                 "Please arrange this reward for them.");
         }
         return;
@@ -1139,9 +1191,10 @@ function promoRewardFinalize($userId, $state) {
         return;
     }
 
-    // Guard against a double-submit creating two promotions from one reward.
+    // Guard against a double-submit creating two promotions from one reward. Only
+    // an approved reward finalizes (markRewardRedeemed also enforces this).
     $rw = $referral ? $referral->reward($rewardId) : null;
-    if (!$rw || $rw['status'] !== 'earned') {
+    if (!$rw || $rw['status'] !== 'approved') {
         $db->setState($userId, 'idle', []);
         promoShowDashboard($userId);
         return;
@@ -1193,6 +1246,70 @@ function promoRewardFinalize($userId, $state) {
             "\xF0\x9F\x8E\x81 <b>Reward promotion scheduled</b>\n\n" .
             htmlspecialchars($who) . " redeemed <b>" . htmlspecialchars($title) . "</b> and it's now booked (promo #{$promoId}).");
     }
+}
+
+// DM admins that a user has claimed a reward, with Approve / Reject buttons.
+function notifyAdminsRewardClaim($userId, $rw) {
+    global $tg, $db, $referral, $config;
+    $user = $db->getUser($userId);
+    $who = $user['name'] ?? ('ID ' . $userId);
+    $phone = $user['phone'] ?? '';
+    $pkgKey = $referral ? $referral->rewardPackage($rw) : '';
+    $pkgLabel = $pkgKey !== '' ? $pkgKey : 'manual bundle';
+    $lifetime = $referral ? $referral->countQualified($userId) : 0;
+    $summary = "\xF0\x9F\x8E\x81 <b>Reward claim awaiting approval</b>\n\n" .
+        "\xF0\x9F\x91\xA4 <b>" . htmlspecialchars($who) . "</b>" . ($phone ? " ({$phone})" : '') . " (ID {$userId})\n" .
+        "\xF0\x9F\x8F\x86 Reward: <b>" . htmlspecialchars($rw['title']) . "</b>\n" .
+        "\xF0\x9F\x93\xA6 Fulfils as: <b>" . htmlspecialchars($pkgLabel) . "</b>\n" .
+        "\xF0\x9F\x91\xA5 Lifetime qualified invites: <b>{$lifetime}</b>\n\n" .
+        "Approve to let them set it up and schedule it, or Reject.";
+    $buttons = [[
+        ['text' => "\xE2\x9C\x85 Approve", 'callback_data' => "rwd_approve_{$rw['id']}"],
+        ['text' => "\xE2\x9D\x8C Reject",  'callback_data' => "rwd_reject_{$rw['id']}"],
+    ]];
+    foreach (($config['admin_ids'] ?? []) as $adminId) {
+        $tg->sendInlineButtons((int) $adminId, $summary, $buttons);
+    }
+}
+
+// Admin approved a reward claim (Telegram button OR the panel calls the same
+// engine method). Moves it to 'approved' and invites the user to set it up.
+function rewardAdminApprove($adminId, $rewardId) {
+    global $tg, $referral;
+    if (!isAdmin($adminId) || !$referral) return;
+    $r = $referral->approveReward($rewardId, $adminId);
+    if (!$r) {
+        $tg->sendMessage($adminId, "That reward claim was already handled.");
+        return;
+    }
+    $tg->sendMessage($adminId, "\xE2\x9C\x85 Approved: <b>" . htmlspecialchars($r['title']) . "</b> for user " . (int) $r['telegram_id'] . ". They've been asked to set it up.");
+    rewardInviteUserToSetUp((int) $r['telegram_id'], $r);
+}
+
+// Admin rejected a reward claim. Notifies the user; invites stay consumed.
+function rewardAdminReject($adminId, $rewardId, $reason = null) {
+    global $tg, $referral;
+    if (!isAdmin($adminId) || !$referral) return;
+    $r = $referral->rejectReward($rewardId, $adminId, $reason);
+    if (!$r) {
+        $tg->sendMessage($adminId, "That reward claim was already handled.");
+        return;
+    }
+    $tg->sendMessage($adminId, "\xE2\x9D\x8C Rejected: <b>" . htmlspecialchars($r['title']) . "</b> for user " . (int) $r['telegram_id'] . ".");
+    $tg->sendInlineButtons((int) $r['telegram_id'],
+        "\xF0\x9F\x98\x94 Your reward claim for <b>" . htmlspecialchars($r['title']) . "</b> wasn't approved this time. If you think this is a mistake, please reach out to support.",
+        [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+}
+
+// Tell a user their reward is approved and give them the "Set up" button.
+function rewardInviteUserToSetUp($userId, $rw) {
+    global $tg;
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x8E\x89 <b>Your reward is approved!</b>\n\n" .
+        "\xF0\x9F\x8E\x81 " . htmlspecialchars($rw['title']) . "\n\n" .
+        "Tap below to set it up - build your business ad, pick a date and time, and it'll be scheduled like a paid promotion and appear in My Dashboard.",
+        [[['text' => "\xE2\x9C\x85 Set Up My Reward", 'callback_data' => 'inv_fulfill_' . $rw['id']]],
+         [['text' => "\xF0\x9F\x93\x8B My Rewards", 'callback_data' => 'inv_myrewards']]]);
 }
 
 function promoNotifyAdmins($promoId, $data, $user) {

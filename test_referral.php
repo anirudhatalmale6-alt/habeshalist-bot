@@ -79,15 +79,34 @@ $ref->updateTier((int)$tiers[0]['id'], 5, $tiers[0]['title'], $tiers[0]['body'],
 ok($ref->spentInvites(100) === $spentBefore, 'spent invites unchanged after lowering a threshold');
 ok(count($ref->checkMilestones(100)) === 0, 'no phantom re-claim from the settings change');
 
-echo "\n[7] Redemption: reward maps to a package, redeem is one-shot\n";
+echo "\n[7] Redemption ladder: earned -> claimed -> approved -> redeemed, one-shot\n";
 $rewards = $ref->earnedRewards(100);
-ok(count($rewards) === 4, 'all four rewards are earned/redeemable');
+ok(count($rewards) === 4, 'all four rewards are earned/claimable');
 $first = $rewards[0];
 ok($ref->rewardPackage($first) === 'monthly', 'first reward grants the monthly package');
+// Step 1: user claims -> pending admin approval.
+ok($ref->markRewardClaimed($first['id']) === true, 'claim moves reward to pending approval');
+ok($ref->reward($first['id'])['status'] === 'claimed', 'status is claimed (awaiting admin)');
+ok($ref->markRewardClaimed($first['id']) === false, 'double claim blocked');
+ok($ref->markRewardRedeemed($first['id'], 555) === false, 'cannot redeem before admin approves');
+// Step 2: admin approves.
+ok($ref->approveReward($first['id'], 999) !== false, 'admin approves the claim');
+ok($ref->reward($first['id'])['status'] === 'approved', 'status is approved');
+ok($ref->approveReward($first['id'], 999) === false, 'approving twice is a no-op');
+// Step 3: finalize -> redeemed, links the promo, one-shot.
 ok($ref->markRewardRedeemed($first['id'], 555) === true, 'redeem succeeds and links promo 555');
 $after = $ref->reward($first['id']);
 ok($after['status'] === 'redeemed' && (int)$after['promo_id'] === 555, 'status redeemed, promo_id stored');
 ok($ref->markRewardRedeemed($first['id'], 777) === false, 'second redeem blocked (no duplicate promo)');
+
+echo "\n[7b] Rejecting a claim keeps invites consumed (no respawn)\n";
+$second = $ref->earnedRewards(100)[0];               // next still-earned reward
+$spentBefore = $ref->spentInvites(100);
+ok($ref->markRewardClaimed($second['id']) === true, 'claim the next reward');
+ok($ref->rejectReward($second['id'], 999, 'test') !== false, 'admin rejects it');
+ok($ref->reward($second['id'])['status'] === 'rejected', 'status is rejected');
+ok($ref->spentInvites(100) === $spentBefore, 'rejected reward still consumes its invites');
+ok(count($ref->checkMilestones(100)) === 0, 'rejected reward does not respawn a new earned one');
 
 echo "\n[8] Group-join gate: unqualified until the friend joins\n";
 $ref->setSetting('referral_require_group_join', '1');

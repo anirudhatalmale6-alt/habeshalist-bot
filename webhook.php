@@ -158,6 +158,9 @@ function handleCallbackQuery($query) {
     if ($data === 'inv_rewards')  { inviteShowRewards($userId); return; }
     if ($data === 'inv_myrewards'){ inviteViewMyRewards($userId); return; }
     if (strpos($data, 'inv_redeem_') === 0) { inviteRedeemReward($userId, (int) substr($data, 11)); return; }
+    if (strpos($data, 'inv_fulfill_') === 0) { rewardBeginFulfillment($userId, (int) substr($data, 12)); return; }
+    if (strpos($data, 'rwd_approve_') === 0) { rewardAdminApprove($userId, (int) substr($data, 12)); return; }
+    if (strpos($data, 'rwd_reject_') === 0) { rewardAdminReject($userId, (int) substr($data, 11)); return; }
     if (strpos($data, 'inv_claim_') === 0) { inviteClaimReward($userId, (int) substr($data, 10)); return; }
     if (strpos($data, 'inv_start_') === 0) { inviteRewardStartMode($userId, (int) substr($data, 10), 'start'); return; }
     if (strpos($data, 'inv_save_')  === 0) { inviteRewardStartMode($userId, (int) substr($data, 9), 'save'); return; }

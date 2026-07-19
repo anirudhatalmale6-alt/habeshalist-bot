@@ -338,11 +338,12 @@ class HL_Referral {
     }
     // How many qualified invites this user has already "spent" earning rewards.
     // Each reward the user has earned consumes its tier's required invites, so
-    // progress toward the NEXT reward resets after every claim. Legacy rejected
-    // rewards don't consume anything.
+    // progress toward the NEXT reward resets after every claim. Every reward row -
+    // including one an admin rejected - keeps its invites consumed, so a rejected
+    // claim never respawns as a fresh earned reward on the next milestone sweep.
     public function spentInvites($telegramId) {
         $stmt = $this->db->prepare("SELECT COALESCE(SUM(tier_invites),0) s FROM referral_rewards
-            WHERE telegram_id = :id AND status <> 'rejected'");
+            WHERE telegram_id = :id");
         $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
         return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['s'] ?? 0);
     }
@@ -353,7 +354,7 @@ class HL_Referral {
     // How many rewards this user has earned so far (drives which tier is next).
     public function rewardCount($telegramId) {
         $stmt = $this->db->prepare("SELECT COUNT(*) c FROM referral_rewards
-            WHERE telegram_id = :id AND status <> 'rejected'");
+            WHERE telegram_id = :id");
         $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
         return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['c'] ?? 0);
     }
@@ -449,10 +450,20 @@ class HL_Referral {
         $stmt->bindValue(':t', $tierId, SQLITE3_INTEGER);
         return (bool) $stmt->execute()->fetchArray(SQLITE3_ASSOC);
     }
-    // Rewards this user has earned but not yet redeemed.
+    // Rewards this user has earned but not yet claimed (ready to request).
     public function earnedRewards($telegramId) {
         $stmt = $this->db->prepare("SELECT * FROM referral_rewards
             WHERE telegram_id = :id AND status = 'earned' ORDER BY created_at ASC");
+        $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
+        $res = $stmt->execute();
+        $out = [];
+        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $out[] = $r; }
+        return $out;
+    }
+    // Rewards an admin has APPROVED and the user can now set up (build the ad).
+    public function approvedRewards($telegramId) {
+        $stmt = $this->db->prepare("SELECT * FROM referral_rewards
+            WHERE telegram_id = :id AND status = 'approved' ORDER BY created_at ASC");
         $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
         $res = $stmt->execute();
         $out = [];
@@ -469,15 +480,29 @@ class HL_Referral {
         }
         return '';
     }
-    // Mark an earned reward as redeemed. Idempotent-ish: returns false if it was
-    // not in the 'earned' state (already redeemed / not found), so a double tap
-    // can never create two promotions from one reward.
-    public function markRewardRedeemed($rewardId, $promoId = null) {
+    // Step 1 of redemption: the user requests to claim an EARNED reward. Moves it
+    // to 'claimed' (awaiting admin approval). One-shot: returns false if it wasn't
+    // 'earned' (already claimed / not found), so a double tap can't queue it twice.
+    public function markRewardClaimed($rewardId) {
         $rw = $this->reward($rewardId);
         if (!$rw || $rw['status'] !== 'earned') return false;
         $stmt = $this->db->prepare("UPDATE referral_rewards
+            SET status='claimed', redeemed_at=NULL WHERE id=:id AND status='earned'");
+        $stmt->bindValue(':id', $rewardId, SQLITE3_INTEGER);
+        $stmt->execute();
+        if ($this->db->changes() < 1) return false;
+        $this->audit('user:' . $rw['telegram_id'], 'reward_claimed', $rw['telegram_id'], $rewardId, $rw['title']);
+        return true;
+    }
+    // Final step: mark an APPROVED reward as redeemed once its promotion is built.
+    // Idempotent-ish: returns false if it wasn't in the 'approved' state (not yet
+    // approved / already redeemed), so a double submit can't create two promotions.
+    public function markRewardRedeemed($rewardId, $promoId = null) {
+        $rw = $this->reward($rewardId);
+        if (!$rw || $rw['status'] !== 'approved') return false;
+        $stmt = $this->db->prepare("UPDATE referral_rewards
             SET status='redeemed', promo_id=:pid, redeemed_at=CURRENT_TIMESTAMP
-            WHERE id=:id AND status='earned'");
+            WHERE id=:id AND status='approved'");
         $stmt->bindValue(':pid', $promoId, $promoId === null ? SQLITE3_NULL : SQLITE3_INTEGER);
         $stmt->bindValue(':id', $rewardId, SQLITE3_INTEGER);
         $stmt->execute();
@@ -523,28 +548,40 @@ class HL_Referral {
     }
 
     // ---- Admin reward actions ----
+    // Approve a CLAIMED reward so the user can set it up. Only acts on a reward
+    // that is waiting (claimed) or, for backward-compat, still earned. Returns the
+    // updated row, or false if it wasn't in an approvable state (already decided).
     public function approveReward($rewardId, $adminId, $startDate = null, $endDate = null, $notes = null) {
+        $rw = $this->reward($rewardId);
+        if (!$rw || !in_array($rw['status'], ['claimed', 'earned'], true)) return false;
         $stmt = $this->db->prepare("UPDATE referral_rewards
             SET status='approved', start_date=:sd, end_date=:ed, notes=:no, decided_by=:by, decided_at=CURRENT_TIMESTAMP
-            WHERE id=:id");
+            WHERE id=:id AND status IN ('claimed','earned')");
         $stmt->bindValue(':sd', $startDate, SQLITE3_TEXT);
         $stmt->bindValue(':ed', $endDate, SQLITE3_TEXT);
         $stmt->bindValue(':no', $notes, SQLITE3_TEXT);
         $stmt->bindValue(':by', $adminId, SQLITE3_INTEGER);
         $stmt->bindValue(':id', $rewardId, SQLITE3_INTEGER);
         $stmt->execute();
+        if ($this->db->changes() < 1) return false;
         $r = $this->reward($rewardId);
         $this->audit('admin:' . $adminId, 'reward_approved', $r['telegram_id'] ?? null, $rewardId,
             trim(($startDate ?: '') . ' -> ' . ($endDate ?: '')));
         return $r;
     }
+    // Reject a claimed/earned reward. Its invites stay consumed (see spentInvites),
+    // so it does not respawn. Returns the row, or false if it was already decided.
     public function rejectReward($rewardId, $adminId, $reason = null) {
+        $rw = $this->reward($rewardId);
+        if (!$rw || !in_array($rw['status'], ['claimed', 'earned', 'approved'], true)) return false;
         $stmt = $this->db->prepare("UPDATE referral_rewards
-            SET status='rejected', notes=:no, decided_by=:by, decided_at=CURRENT_TIMESTAMP WHERE id=:id");
+            SET status='rejected', notes=:no, decided_by=:by, decided_at=CURRENT_TIMESTAMP
+            WHERE id=:id AND status IN ('claimed','earned','approved')");
         $stmt->bindValue(':no', $reason, SQLITE3_TEXT);
         $stmt->bindValue(':by', $adminId, SQLITE3_INTEGER);
         $stmt->bindValue(':id', $rewardId, SQLITE3_INTEGER);
         $stmt->execute();
+        if ($this->db->changes() < 1) return false;
         $r = $this->reward($rewardId);
         $this->audit('admin:' . $adminId, 'reward_rejected', $r['telegram_id'] ?? null, $rewardId, (string) $reason);
         return $r;
@@ -670,6 +707,7 @@ class HL_Referral {
             'qualified'        => (int) $this->db->querySingle("SELECT COUNT(*) FROM referrals WHERE status='qualified'"),
             'flagged'          => (int) $this->db->querySingle("SELECT COUNT(*) FROM referrals WHERE flagged=1"),
             'rewards_earned'   => (int) $this->db->querySingle("SELECT COUNT(*) FROM referral_rewards WHERE status='earned'"),
+            'rewards_pending'  => (int) $this->db->querySingle("SELECT COUNT(*) FROM referral_rewards WHERE status='claimed'"),
             'rewards_redeemed' => (int) $this->db->querySingle("SELECT COUNT(*) FROM referral_rewards WHERE status IN ('redeemed','approved')"),
         ];
     }
@@ -817,9 +855,10 @@ function inviteShowProgress($userId) {
         $msg .= "\xF0\x9F\x8E\x81 Rewards aren't set up yet - check back soon!\n";
     }
 
-    $redeemed = 0; $ready = 0;
+    $redeemed = 0; $ready = 0; $pending = 0;
     foreach ($p['rewards'] as $rw) {
         if ($rw['status'] === 'earned') $ready++;
+        elseif ($rw['status'] === 'claimed') $pending++;
         elseif (in_array($rw['status'], ['redeemed','approved'], true)) $redeemed++;
     }
     $msg .= "\n<b>Summary</b>\n";
@@ -827,8 +866,9 @@ function inviteShowProgress($userId) {
     if (!empty($p['awaiting_group'])) {
         $msg .= "\xE2\x80\xA2 Waiting to join the group: <b>{$p['awaiting_group']}</b>\n";
     }
-    $msg .= "\xE2\x80\xA2 Rewards ready to redeem: <b>{$ready}</b>\n";
-    $msg .= "\xE2\x80\xA2 Rewards claimed: <b>{$redeemed}</b>\n\n";
+    $msg .= "\xE2\x80\xA2 Rewards ready to claim: <b>{$ready}</b>\n";
+    if ($pending > 0) $msg .= "\xE2\x80\xA2 Claims awaiting approval: <b>{$pending}</b>\n";
+    $msg .= "\xE2\x80\xA2 Rewards approved/scheduled: <b>{$redeemed}</b>\n\n";
 
     $msg .= "<b>Reward Milestones</b> <i>(each one needs a fresh set of invites)</i>\n";
     foreach ($p['tiers'] as $t) {
@@ -887,11 +927,16 @@ function inviteShowRewards($userId) {
     }
     $msg .= "<i>Each reward uses up the invites it costs - keep inviting to unlock the next one.</i>";
 
-    // Buttons: redeem any earned-but-unredeemed reward.
+    // Buttons: claim any earned reward (sent to admin for approval), and set up
+    // any reward the admin has already approved (build the ad + pick date/time).
     $rows = [];
     foreach ($referral->earnedRewards($userId) as $rw) {
-        $rows[] = [['text' => "\xF0\x9F\x8E\x89 Redeem: " . mb_strimwidth($rw['title'], 0, 26, '...'),
+        $rows[] = [['text' => "\xF0\x9F\x8E\x89 Claim: " . mb_strimwidth($rw['title'], 0, 26, '...'),
                    'callback_data' => 'inv_redeem_' . $rw['id']]];
+    }
+    foreach ($referral->approvedRewards($userId) as $rw) {
+        $rows[] = [['text' => "\xE2\x9C\x85 Set up: " . mb_strimwidth($rw['title'], 0, 24, '...'),
+                   'callback_data' => 'inv_fulfill_' . $rw['id']]];
     }
     $rows[] = [['text' => "\xF0\x9F\x93\x8B View My Rewards", 'callback_data' => 'inv_myrewards']];
     $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'invite']];
@@ -906,9 +951,9 @@ function inviteRewardUnlocked($userId, $rw) {
         "\xF0\x9F\x8E\x89 <b>Milestone Reached!</b>\n\n" .
         "You earned <b>{$rw['tier_invites']}</b> qualified invites!\n\n" .
         "\xF0\x9F\x8E\x81 Reward Unlocked: <b>" . htmlspecialchars($rw['title']) . "</b>\n\n" .
-        "Redeem it now to set it up and schedule your promotion.",
+        "Claim it now - once our team approves it, you'll set it up and schedule your promotion.",
         [
-            [['text' => "\xF0\x9F\x8E\x89 Redeem Now", 'callback_data' => 'inv_redeem_' . $rw['id']]],
+            [['text' => "\xF0\x9F\x8E\x89 Claim Now", 'callback_data' => 'inv_redeem_' . $rw['id']]],
             [['text' => "\xF0\x9F\x93\x8B View My Rewards", 'callback_data' => 'inv_myrewards']],
             [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'inv_rewards']],
         ]);
@@ -957,9 +1002,10 @@ function inviteViewMyRewards($userId) {
         return;
     }
     $labels = [
-        'earned'   => "\xF0\x9F\x8E\x81 Ready to redeem",
+        'earned'   => "\xF0\x9F\x8E\x81 Ready to claim",
+        'claimed'  => "\xE2\x8F\xB3 Pending approval",
+        'approved' => "\xE2\x9C\x85 Approved - set it up",
         'redeemed' => "\xE2\x9C\x85 Redeemed - scheduled",
-        'approved' => "\xE2\x9C\x85 Active",
         'rejected' => "\xE2\x9D\x8C Not approved",
     ];
     $msg = "\xF0\x9F\x93\x8B <b>My Rewards</b>\n\n";
@@ -971,8 +1017,11 @@ function inviteViewMyRewards($userId) {
         if ($rw['start_date']) $msg .= "   Start: " . htmlspecialchars($rw['start_date']) . ($rw['end_date'] ? " \xE2\x86\x92 " . htmlspecialchars($rw['end_date']) : '') . "\n";
         $msg .= "\n";
         if ($rw['status'] === 'earned') {
-            $rows[] = [['text' => "\xF0\x9F\x8E\x89 Redeem: " . mb_strimwidth($rw['title'], 0, 26, '...'),
+            $rows[] = [['text' => "\xF0\x9F\x8E\x89 Claim: " . mb_strimwidth($rw['title'], 0, 26, '...'),
                        'callback_data' => 'inv_redeem_' . $rw['id']]];
+        } elseif ($rw['status'] === 'approved') {
+            $rows[] = [['text' => "\xE2\x9C\x85 Set up: " . mb_strimwidth($rw['title'], 0, 24, '...'),
+                       'callback_data' => 'inv_fulfill_' . $rw['id']]];
         }
     }
     $rows[] = [['text' => "\xF0\x9F\x8E\x81 Rewards", 'callback_data' => 'inv_rewards']];

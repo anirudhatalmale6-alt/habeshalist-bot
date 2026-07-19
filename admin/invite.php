@@ -92,7 +92,41 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
                 if (!$g) $flashType = 'err';
             } else { $flash = 'Enter a Telegram user ID and pick a tier.'; $flashType = 'err'; }
             break;
+        case 'reward_approve':
+            $rid = (int) ($_POST['reward_id'] ?? 0);
+            $r = $rid ? $ref->approveReward($rid, $adminId) : false;
+            if ($r) { hl_reward_notify_user($r, 'approve'); $flash = 'Reward approved - the user has been asked to set it up (build ad, pick date/time).'; }
+            else { $flash = 'That reward claim was already handled.'; $flashType = 'err'; }
+            break;
+        case 'reward_reject':
+            $rid = (int) ($_POST['reward_id'] ?? 0);
+            $r = $rid ? $ref->rejectReward($rid, $adminId, trim((string) ($_POST['reason'] ?? '')) ?: null) : false;
+            if ($r) { hl_reward_notify_user($r, 'reject'); $flash = 'Reward claim rejected - the user has been notified.'; }
+            else { $flash = 'That reward claim was already handled.'; $flashType = 'err'; }
+            break;
     }
+}
+
+// DM the reward owner in Telegram after an approve/reject from the panel. On
+// approval they get a "Set Up My Reward" button that starts the ad form in the bot.
+function hl_reward_notify_user($r, $decision) {
+    $token = hl_effective_secret('TELEGRAM_BOT_TOKEN', 'sec_bot_token');
+    if ($token === '' || empty($r['telegram_id'])) return;
+    $uid = (int) $r['telegram_id'];
+    $title = htmlspecialchars((string) $r['title']);
+    if ($decision === 'approve') {
+        $text = "\xF0\x9F\x8E\x89 <b>Your reward is approved!</b>\n\n\xF0\x9F\x8E\x81 {$title}\n\n" .
+            "Tap below to set it up - build your business ad, pick a date and time, and it'll be scheduled like a paid promotion and appear in My Dashboard.";
+        $kb = ['inline_keyboard' => [
+            [['text' => "\xE2\x9C\x85 Set Up My Reward", 'callback_data' => 'inv_fulfill_' . (int) $r['id']]],
+            [['text' => "\xF0\x9F\x93\x8B My Rewards", 'callback_data' => 'inv_myrewards']],
+        ]];
+    } else {
+        $text = "\xF0\x9F\x98\x94 Your reward claim for <b>{$title}</b> wasn't approved this time. " .
+            "If you think this is a mistake, please reach out to support.";
+        $kb = ['inline_keyboard' => [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]];
+    }
+    hl_tg_api($token, 'sendMessage', ['chat_id' => $uid, 'text' => $text, 'parse_mode' => 'HTML', 'reply_markup' => json_encode($kb)]);
 }
 $csrf = h(hl_csrf_token());
 
@@ -100,6 +134,7 @@ $enabled   = $ref->isEnabled();
 $stats     = $ref->stats();
 $tiers     = $ref->tiers(false);
 $allReward = $ref->listRewards(null, 60);
+$claimed   = $ref->listRewards('claimed', 60);
 $referrals = $ref->listReferrals(120);
 $audit     = $ref->listAudit(40);
 $needJoin  = $ref->requiresGroupJoin();
@@ -107,7 +142,8 @@ $needJoin  = $ref->requiresGroupJoin();
 function inv_status_pill($status) {
     switch ($status) {
         case 'approved': case 'qualified': case 'redeemed': return ['ok', ucfirst($status)];
-        case 'earned':   return ['pend', 'Ready to redeem'];
+        case 'earned':   return ['pend', 'Ready to claim'];
+        case 'claimed':  return ['pend', 'Awaiting approval'];
         case 'registered': return ['pend', 'Settling'];
         case 'rejected': return ['rej', 'Rejected'];
         default: return ['mut', ucfirst(str_replace('_', ' ', (string) $status))];
@@ -151,8 +187,9 @@ if ($flash) hl_flash($flash, $flashType);
     <div class="kpi"><div class="n"><?= (int) $stats['referrals'] ?></div><div class="l">Total referrals</div></div>
     <div class="kpi"><div class="n"><?= (int) $stats['qualified'] ?></div><div class="l">Qualified</div></div>
     <div class="kpi"><div class="n"><?= (int) $stats['flagged'] ?></div><div class="l">Flagged for review</div></div>
-    <div class="kpi"><div class="n"><?= (int) $stats['rewards_earned'] ?></div><div class="l">Rewards ready to redeem</div></div>
-    <div class="kpi"><div class="n"><?= (int) $stats['rewards_redeemed'] ?></div><div class="l">Rewards redeemed</div></div>
+    <div class="kpi"><div class="n"><?= (int) $stats['rewards_earned'] ?></div><div class="l">Rewards ready to claim</div></div>
+    <div class="kpi"><div class="n"><?= (int) ($stats['rewards_pending'] ?? 0) ?></div><div class="l">Claims awaiting approval</div></div>
+    <div class="kpi"><div class="n"><?= (int) $stats['rewards_redeemed'] ?></div><div class="l">Rewards approved/scheduled</div></div>
   </div>
 </div>
 
@@ -184,6 +221,42 @@ if ($flash) hl_flash($flash, $flashType);
     </div>
     <div><button class="btn" type="submit">Save rules</button></div>
   </form>
+</div>
+
+<div class="card">
+  <div class="hd"><h2>Reward Claims Awaiting Approval<?= $claimed ? ' (' . count($claimed) . ')' : '' ?></h2></div>
+  <p class="sub">When a user claims an unlocked reward it lands here first. Approve it and the user is asked (in the bot) to build their ad and pick a date/time - it's then scheduled and shows in their dashboard exactly like a paid promotion. Reject to decline the claim.</p>
+  <?php if (!$claimed): ?>
+    <div class="empty">No reward claims waiting. New claims appear here automatically.</div>
+  <?php else: ?>
+  <div class="tblwrap"><table>
+    <thead><tr><th>User</th><th>Reward</th><th>Fulfils as</th><th>Claimed</th><th style="width:200px">Action</th></tr></thead>
+    <tbody>
+    <?php foreach ($claimed as $rw): $pk = $ref->rewardPackage($rw); ?>
+      <tr>
+        <td><b><?= h($rw['user_name'] ?: ('#' . $rw['telegram_id'])) ?></b><span class="mini">ID <?= (int) $rw['telegram_id'] ?></span></td>
+        <td><?= h($rw['title']) ?></td>
+        <td class="mini"><?= h($HL_FULFILL_PACKAGES[$pk] ?? ($pk ?: 'Manual - our team sets it up')) ?></td>
+        <td class="mini"><?= h($rw['created_at']) ?></td>
+        <td>
+          <form method="post" style="display:inline">
+            <input type="hidden" name="csrf" value="<?= $csrf ?>">
+            <input type="hidden" name="action" value="reward_approve">
+            <input type="hidden" name="reward_id" value="<?= (int) $rw['id'] ?>">
+            <button class="btn sm" type="submit">Approve</button>
+          </form>
+          <form method="post" style="display:inline" onsubmit="return confirm('Reject this reward claim? The user will be notified.');">
+            <input type="hidden" name="csrf" value="<?= $csrf ?>">
+            <input type="hidden" name="action" value="reward_reject">
+            <input type="hidden" name="reward_id" value="<?= (int) $rw['id'] ?>">
+            <button class="btn sm red" type="submit">Reject</button>
+          </form>
+        </td>
+      </tr>
+    <?php endforeach; ?>
+    </tbody>
+  </table></div>
+  <?php endif; ?>
 </div>
 
 <div class="card">
@@ -242,7 +315,7 @@ if ($flash) hl_flash($flash, $flashType);
 
 <div class="card">
   <div class="hd"><h2>Gift a Reward</h2></div>
-  <p class="sub">Optionally give a user a reward without them inviting anyone - for example a goodwill gesture. It appears in their bot as "ready to redeem", and they pick a date/time to schedule it just like any other reward. This is a gift, not an approval step.</p>
+  <p class="sub">Optionally give a user a reward without them inviting anyone - for example a goodwill gesture. It appears in their bot as "ready to claim". When they claim it, it comes back here for your approval like any other claim, then they set it up and pick a date/time.</p>
   <form method="post" class="row">
     <input type="hidden" name="csrf" value="<?= $csrf ?>">
     <input type="hidden" name="action" value="grant_reward">
