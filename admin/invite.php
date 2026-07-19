@@ -2,10 +2,13 @@
 /**
  * invite.php - admin control panel for the Invite & Earn referral system.
  *
- * Turn the feature on/off, configure the settle window, manage reward tiers,
- * approve/reject earned rewards, review (and moderate) referrals, grant rewards
- * manually, and read the audit log. All logic lives in HL_Referral so the bot
- * and this panel behave identically.
+ * Turn the feature on/off, configure the rules, manage reward tiers (including
+ * which promotion each reward grants when redeemed), monitor referrals and
+ * rewards, optionally gift a reward, and read the audit log.
+ *
+ * Referrals are verified AUTOMATICALLY (join the group + settle window) and
+ * rewards are earned automatically - there is no manual approve/reject step.
+ * All logic lives in HL_Referral so the bot and this panel behave identically.
  */
 require __DIR__ . '/lib.php';
 require __DIR__ . '/view.php';
@@ -26,6 +29,16 @@ if (!class_exists('HL_Referral')) {
 $ref = new HL_Referral(BOT_DB_PATH);
 $adminId = (int) ($_SESSION['hl_admin'] ?? 1);
 $flash = null; $flashType = 'ok';
+
+// Promotion packages a reward can grant when redeemed. '' = the team sets it up
+// manually (e.g. a multi-part bundle that isn't a single package).
+$HL_FULFILL_PACKAGES = [
+    ''         => 'Manual - our team sets it up',
+    'one_time' => 'One-Time Post',
+    'monthly'  => 'Monthly',
+    'yearly'   => 'Yearly',
+    'botw'     => 'Business of the Week',
+];
 
 if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
     hl_csrf_check();
@@ -51,35 +64,21 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
             $inv = (int) ($_POST['invites'] ?? 0);
             $title = trim((string) ($_POST['title'] ?? ''));
             $body = trim((string) ($_POST['body'] ?? ''));
-            if ($inv > 0 && $title !== '') { $ref->addTier($inv, $title, $body); $flash = 'Reward tier added.'; }
+            $pk = (string) ($_POST['fulfill_package'] ?? '');
+            if (!isset($HL_FULFILL_PACKAGES[$pk])) $pk = '';
+            if ($inv > 0 && $title !== '') { $ref->addTier($inv, $title, $body, $pk); $flash = 'Reward tier added.'; }
             else { $flash = 'Please enter an invite count and a title.'; $flashType = 'err'; }
             break;
         case 'tier_save':
+            $pk = (string) ($_POST['fulfill_package'] ?? '');
+            if (!isset($HL_FULFILL_PACKAGES[$pk])) $pk = '';
             $ref->updateTier((int) $_POST['tier_id'], (int) $_POST['invites'], trim((string) $_POST['title']),
-                trim((string) ($_POST['body'] ?? '')), isset($_POST['active']));
+                trim((string) ($_POST['body'] ?? '')), isset($_POST['active']), $pk);
             $flash = 'Reward tier updated.';
             break;
         case 'tier_delete':
             $ref->deleteTier((int) $_POST['tier_id']);
             $flash = 'Reward tier removed.';
-            break;
-        case 'reward_approve':
-            $ref->approveReward((int) $_POST['reward_id'], $adminId,
-                trim((string) ($_POST['start_date'] ?? '')) ?: null,
-                trim((string) ($_POST['end_date'] ?? '')) ?: null,
-                trim((string) ($_POST['notes'] ?? '')) ?: null);
-            $flash = 'Reward approved.';
-            break;
-        case 'reward_reject':
-            $ref->rejectReward((int) $_POST['reward_id'], $adminId, trim((string) ($_POST['reason'] ?? '')) ?: null);
-            $flash = 'Reward rejected.';
-            break;
-        case 'referral_status':
-            $st = $_POST['status'] ?? '';
-            if (in_array($st, ['qualified', 'rejected'], true)) {
-                $ref->setReferralStatus((int) $_POST['ref_id'], $st, $adminId);
-                $flash = 'Referral marked ' . $st . '.';
-            }
             break;
         case 'grant_reward':
             $tid = (int) ($_POST['telegram_id'] ?? 0);
@@ -100,7 +99,6 @@ $csrf = h(hl_csrf_token());
 $enabled   = $ref->isEnabled();
 $stats     = $ref->stats();
 $tiers     = $ref->tiers(false);
-$pending   = $ref->listRewards('earned');
 $allReward = $ref->listRewards(null, 60);
 $referrals = $ref->listReferrals(120);
 $audit     = $ref->listAudit(40);
@@ -108,8 +106,8 @@ $needJoin  = $ref->requiresGroupJoin();
 
 function inv_status_pill($status) {
     switch ($status) {
-        case 'approved': case 'qualified': return ['ok', ucfirst($status)];
-        case 'earned':   return ['pend', 'Pending'];
+        case 'approved': case 'qualified': case 'redeemed': return ['ok', ucfirst($status)];
+        case 'earned':   return ['pend', 'Ready to redeem'];
         case 'registered': return ['pend', 'Settling'];
         case 'rejected': return ['rej', 'Rejected'];
         default: return ['mut', ucfirst(str_replace('_', ' ', (string) $status))];
@@ -148,13 +146,13 @@ if ($flash) hl_flash($flash, $flashType);
       <button class="btn sm <?= $enabled ? 'red' : '' ?>" type="submit"><?= $enabled ? 'Turn OFF' : 'Turn ON' ?></button>
     </form>
   </div>
-  <p class="sub">The referral program customers use to invite friends and earn rewards. Turn it on/off, set the rules, and approve rewards below.</p>
+  <p class="sub">The referral program customers use to invite friends and earn rewards. Invites are verified automatically (group join + settle window) and rewards unlock automatically - no manual approval needed.</p>
   <div class="grid4">
     <div class="kpi"><div class="n"><?= (int) $stats['referrals'] ?></div><div class="l">Total referrals</div></div>
     <div class="kpi"><div class="n"><?= (int) $stats['qualified'] ?></div><div class="l">Qualified</div></div>
     <div class="kpi"><div class="n"><?= (int) $stats['flagged'] ?></div><div class="l">Flagged for review</div></div>
-    <div class="kpi"><div class="n"><?= (int) $stats['rewards_pending'] ?></div><div class="l">Rewards pending</div></div>
-    <div class="kpi"><div class="n"><?= (int) $stats['rewards_approved'] ?></div><div class="l">Rewards approved</div></div>
+    <div class="kpi"><div class="n"><?= (int) $stats['rewards_earned'] ?></div><div class="l">Rewards ready to redeem</div></div>
+    <div class="kpi"><div class="n"><?= (int) $stats['rewards_redeemed'] ?></div><div class="l">Rewards redeemed</div></div>
   </div>
 </div>
 
@@ -203,6 +201,16 @@ if ($flash) hl_flash($flash, $flashType);
         <div style="width:auto"><label>Active</label>
           <input type="checkbox" name="active" <?= (int) $t['active'] === 1 ? 'checked' : '' ?> style="width:auto;height:20px"></div>
       </div>
+      <div class="row" style="margin-top:8px">
+        <div class="f"><label>Grants this promotion when redeemed</label>
+          <select name="fulfill_package">
+            <?php foreach ($HL_FULFILL_PACKAGES as $pk => $plabel): ?>
+              <option value="<?= h($pk) ?>" <?= (string) ($t['fulfill_package'] ?? '') === (string) $pk ? 'selected' : '' ?>><?= h($plabel) ?></option>
+            <?php endforeach; ?>
+          </select>
+          <div class="mini">When a user redeems this reward, the bot sets up this promotion for them (no payment) and schedules it. Choose "Manual" for bundles the team arranges by hand.</div>
+        </div>
+      </div>
       <div class="f" style="margin-top:8px"><label>Reward content (one benefit per line)</label>
         <textarea name="body"><?= h($t['body']) ?></textarea></div>
       <div class="row" style="margin-top:8px">
@@ -220,6 +228,12 @@ if ($flash) hl_flash($flash, $flashType);
     <div class="row" style="margin-top:8px">
       <div style="width:120px"><label>Invites</label><input type="number" name="invites" min="1" placeholder="e.g. 150"></div>
       <div class="f"><label>Title</label><input type="text" name="title" placeholder="Reward name"></div>
+      <div class="f"><label>Grants when redeemed</label>
+        <select name="fulfill_package">
+          <?php foreach ($HL_FULFILL_PACKAGES as $pk => $plabel): ?>
+            <option value="<?= h($pk) ?>"><?= h($plabel) ?></option>
+          <?php endforeach; ?>
+        </select></div>
     </div>
     <div class="f" style="margin-top:8px"><label>Reward content</label><textarea name="body" placeholder="One benefit per line"></textarea></div>
     <div style="margin-top:8px"><button class="btn sm" type="submit">Add tier</button></div>
@@ -227,39 +241,8 @@ if ($flash) hl_flash($flash, $flashType);
 </div>
 
 <div class="card">
-  <div class="hd"><h2>Rewards Pending Approval<?= $pending ? ' (' . count($pending) . ')' : '' ?></h2></div>
-  <?php if (!$pending): ?>
-    <div class="empty">No rewards waiting. Approvals appear here when a user reaches a milestone.</div>
-  <?php else: ?>
-  <div class="tblwrap"><table>
-    <thead><tr><th>User</th><th>Reward</th><th>Requested start</th><th>Approve with dates</th></tr></thead>
-    <tbody>
-    <?php foreach ($pending as $rw): ?>
-      <tr>
-        <td><b><?= h($rw['user_name'] ?: ('#' . $rw['telegram_id'])) ?></b><span class="mini">ID <?= (int) $rw['telegram_id'] ?></span></td>
-        <td><?= h($rw['title']) ?><span class="mini"><?= (int) $rw['tier_invites'] ?> invites</span></td>
-        <td class="mini"><?= h($rw['start_date'] ?: '-') ?><?= $rw['notes'] ? '<br>' . h($rw['notes']) : '' ?></td>
-        <td>
-          <form method="post" class="approveform">
-            <input type="hidden" name="csrf" value="<?= $csrf ?>">
-            <input type="hidden" name="reward_id" value="<?= (int) $rw['id'] ?>">
-            <input type="date" name="start_date" value="<?= h(substr((string) $rw['start_date'], 0, 10)) ?>">
-            <input type="date" name="end_date">
-            <button class="btn sm" type="submit" name="action" value="reward_approve">Approve</button>
-            <button class="btn sm red" type="submit" name="action" value="reward_reject"
-              onclick="return confirm('Reject this reward?')">Reject</button>
-          </form>
-        </td>
-      </tr>
-    <?php endforeach; ?>
-    </tbody>
-  </table></div>
-  <?php endif; ?>
-</div>
-
-<div class="card">
-  <div class="hd"><h2>Grant a Reward Manually</h2></div>
-  <p class="sub">Give a user a reward without them needing to invite anyone. It's recorded as approved right away.</p>
+  <div class="hd"><h2>Gift a Reward</h2></div>
+  <p class="sub">Optionally give a user a reward without them inviting anyone - for example a goodwill gesture. It appears in their bot as "ready to redeem", and they pick a date/time to schedule it just like any other reward. This is a gift, not an approval step.</p>
   <form method="post" class="row">
     <input type="hidden" name="csrf" value="<?= $csrf ?>">
     <input type="hidden" name="action" value="grant_reward">
@@ -281,8 +264,9 @@ if ($flash) hl_flash($flash, $flashType);
   <?php if (!$referrals): ?>
     <div class="empty">No referrals yet.</div>
   <?php else: ?>
+  <p class="sub">Referrals are verified and counted automatically - once the invited friend joins the group (and any settle window passes), the invite qualifies on its own.</p>
   <div class="tblwrap"><table>
-    <thead><tr><th>Invited friend</th><th>Invited by</th><th>Status</th><th>When</th><th>Action</th></tr></thead>
+    <thead><tr><th>Invited friend</th><th>Invited by</th><th>Status</th><th>When</th></tr></thead>
     <tbody>
     <?php foreach ($referrals as $r): list($pc, $pl) = inv_status_pill($r['status']); ?>
       <tr>
@@ -296,21 +280,6 @@ if ($flash) hl_flash($flash, $flashType);
                     : '<span class="pill mut" title="Has not joined the group yet">Not in group</span>' ?>
             <?php endif; ?></td>
         <td class="mini"><?= h($r['created_at']) ?></td>
-        <td>
-          <?php if ($r['status'] !== 'qualified'): ?>
-          <form method="post" class="inl"><input type="hidden" name="csrf" value="<?= $csrf ?>">
-            <input type="hidden" name="action" value="referral_status"><input type="hidden" name="ref_id" value="<?= (int) $r['id'] ?>">
-            <input type="hidden" name="status" value="qualified">
-            <button class="btn sm" type="submit" title="Count this referral now">Approve</button></form>
-          <?php endif; ?>
-          <?php if ($r['status'] !== 'rejected'): ?>
-          <form method="post" class="inl" onsubmit="return confirm('Reject this referral so it never counts?')">
-            <input type="hidden" name="csrf" value="<?= $csrf ?>">
-            <input type="hidden" name="action" value="referral_status"><input type="hidden" name="ref_id" value="<?= (int) $r['id'] ?>">
-            <input type="hidden" name="status" value="rejected">
-            <button class="btn sm red" type="submit">Reject</button></form>
-          <?php endif; ?>
-        </td>
       </tr>
     <?php endforeach; ?>
     </tbody>

@@ -1019,6 +1019,10 @@ function promoSubmit($userId, $state) {
 
     $data = $state['data'];
 
+    // A redeemed referral reward: no payment, auto-approved, scheduled like a
+    // paid promotion (handled in its own finalizer).
+    if (!empty($data['_reward_id'])) { promoRewardFinalize($userId, $state); return; }
+
     // Editing a saved ad already persists changes - never create a duplicate.
     if (!empty($data['_edit_promo_id'])) { promoShowDashboard($userId); return; }
     // Guard against a stale/blank Submit tap after the flow was reset.
@@ -1054,6 +1058,141 @@ function promoSubmit($userId, $state) {
     );
 
     promoNotifyAdmins($promoId, $data, $user);
+}
+
+// ============================================================
+// REWARD REDEMPTION (Invite & Earn)
+// A referral reward becomes a real, payment-free promotion that schedules and
+// posts exactly like a paid one.
+// ============================================================
+
+// Entry: user tapped "Redeem" on an earned reward. Starts the promo ad form for
+// the reward's package with payment bypassed, or hands a bundle to the team.
+function inviteRedeemReward($userId, $rewardId) {
+    global $tg, $db, $referral, $config;
+    if (!$referral) { $tg->sendMessage($userId, "Sorry, rewards aren't available right now."); return; }
+    $rw = $referral->reward($rewardId);
+    if (!$rw || (int) $rw['telegram_id'] !== (int) $userId) {
+        $tg->sendMessage($userId, "Sorry, that reward could not be found.");
+        return;
+    }
+    if ($rw['status'] !== 'earned') {
+        $tg->sendInlineButtons($userId,
+            "\xE2\x9C\x85 You've already redeemed <b>" . htmlspecialchars($rw['title']) . "</b>.",
+            [[['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
+             [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+        return;
+    }
+
+    $pkgKey = $referral->rewardPackage($rw);
+    $pkg = ($pkgKey !== '' && function_exists('promoPackage')) ? promoPackage($pkgKey) : null;
+
+    // No single package maps to this reward (e.g. a multi-part bundle) -> mark it
+    // redeemed and have the team arrange it.
+    if (!$pkg) {
+        $referral->markRewardRedeemed($rewardId, null);
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x8E\x81 <b>" . htmlspecialchars($rw['title']) . "</b> redeemed!\n\n" .
+            "This reward bundles several perks, so our team will set it up for you and reach out shortly to arrange the details.",
+            [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+        $user = $db->getUser($userId);
+        $who = $user['name'] ?? ('ID ' . $userId);
+        foreach (($config['admin_ids'] ?? []) as $aid) {
+            $tg->sendMessage((int) $aid,
+                "\xF0\x9F\x8E\x81 <b>Reward redeemed - manual setup needed</b>\n\n" .
+                htmlspecialchars($who) . " (ID {$userId}) redeemed: <b>" . htmlspecialchars($rw['title']) . "</b>\n" .
+                "Please arrange this reward for them.");
+        }
+        return;
+    }
+
+    // Package-backed reward -> run the normal ad form, payment skipped.
+    $data = [
+        'package_key'    => $pkgKey,
+        'price'          => 0,
+        'posts_total'    => $pkg['posts_total'],
+        'payment_method' => 'reward',
+        'payment_status' => 'reward',
+        'receipt'        => 'HL-REWARD-' . strtoupper(substr(md5($userId . '-' . $rewardId), 0, 6)),
+        '_reward_id'     => (int) $rewardId,
+        '_reward_title'  => $rw['title'],
+    ];
+    $tg->sendMessage($userId,
+        "\xF0\x9F\x8E\x89 Redeeming <b>" . htmlspecialchars($rw['title']) . "</b> - no payment needed!\n\n" .
+        "Let's set up your promotion. Build your business ad, then pick when it goes live.");
+    promoStartForm($userId, $data);
+}
+
+// Finalize a redeemed-reward promotion: create it already approved, book the
+// schedule immediately, mark the reward redeemed, and (optionally) publish to the
+// website - all the paid-promo steps, minus payment and manual review.
+function promoRewardFinalize($userId, $state) {
+    global $tg, $db, $referral, $config;
+    $data = $state['data'];
+    $rewardId = (int) ($data['_reward_id'] ?? 0);
+
+    if (empty($data['business_name'])) {
+        $tg->sendInlineButtons($userId,
+            "That reward setup is no longer in progress. You can pick up your reward from Invite & Earn.",
+            [[['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
+             [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+        return;
+    }
+
+    // Guard against a double-submit creating two promotions from one reward.
+    $rw = $referral ? $referral->reward($rewardId) : null;
+    if (!$rw || $rw['status'] !== 'earned') {
+        $db->setState($userId, 'idle', []);
+        promoShowDashboard($userId);
+        return;
+    }
+
+    $data['status'] = 'approved';           // reward promos skip manual review
+    if (empty($data['payment_status'])) $data['payment_status'] = 'reward';
+    $promoId = $db->createPromotion($userId, $data);
+    $db->setState($userId, 'idle', []);
+
+    if ($referral) $referral->markRewardRedeemed($rewardId, $promoId);
+
+    // Book the schedule right away so it shows in My Dashboard immediately.
+    if (function_exists('promoRebookNow')) promoRebookNow($promoId);
+
+    // Publish to the website too, mirroring a paid approval (guarded).
+    if (function_exists('publishPromotionToWebsite') &&
+        $db->getSetting('promo_publish_website', '1') === '1') {
+        try {
+            $promo = $db->getPromotion($promoId);
+            $res = publishPromotionToWebsite($promo);
+            if (is_array($res) && !empty($res['success']) && !empty($res['osclass_id'])) {
+                $db->updatePromotion($promoId, ['website_item_id' => (int) $res['osclass_id'], 'website_status' => 'live']);
+            } else {
+                $db->updatePromotion($promoId, ['website_status' => 'failed']);
+            }
+        } catch (Throwable $e) {
+            $db->updatePromotion($promoId, ['website_status' => 'failed']);
+            error_log('reward website publish failed: ' . $e->getMessage());
+        }
+    }
+
+    $title = $data['_reward_title'] ?? 'your reward';
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x8E\x89 <b>Your reward is scheduled!</b>\n\n" .
+        "\xF0\x9F\x8E\x81 " . htmlspecialchars($title) . "\n\n" .
+        "Your posts are booked for:\n" . promoScheduleSummary($data['schedule'] ?? []) . "\n\n" .
+        "It will post in the HabeshaList Telegram Group at the times you chose, just like a paid promotion. Track it any time in My Dashboard.",
+        [
+            [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
+            [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
+        ]);
+
+    // Let admins know a reward promotion went live (informational, not approval).
+    $user = $db->getUser($userId);
+    $who = $user['name'] ?? ('ID ' . $userId);
+    foreach (($config['admin_ids'] ?? []) as $aid) {
+        $tg->sendMessage((int) $aid,
+            "\xF0\x9F\x8E\x81 <b>Reward promotion scheduled</b>\n\n" .
+            htmlspecialchars($who) . " redeemed <b>" . htmlspecialchars($title) . "</b> and it's now booked (promo #{$promoId}).");
+    }
 }
 
 function promoNotifyAdmins($promoId, $data, $user) {

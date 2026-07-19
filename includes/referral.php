@@ -24,10 +24,13 @@ class HL_Referral {
     public $log = [];
 
     // Default reward tiers, seeded once. Straight from the client's mockup.
+    // 4th element = the promotion package the reward grants when redeemed, so the
+    // reward is delivered exactly like a paid promotion (blank = the team sets it
+    // up manually, e.g. a multi-part bundle that isn't a single package).
     const DEFAULT_TIERS = [
-        [20,  '1 Month Telegram Promotion',            "2 promotional posts per week for 1 month."],
-        [50,  '1 Week Premium Business of the Week',   "Featured and pinned in the group for 7 days."],
-        [100, 'Business Growth Package',               "3 Months Telegram Promotion\n1 Month Business of the Week\nHomepage Featured Listing\nOne Promotional Video/Reel"],
+        [20,  '1 Month Telegram Promotion',            "2 promotional posts per week for 1 month.", 'monthly'],
+        [50,  '1 Week Premium Business of the Week',   "Featured and pinned in the group for 7 days.", 'botw'],
+        [100, 'Business Growth Package',               "3 Months Telegram Promotion\n1 Month Business of the Week\nHomepage Featured Listing\nOne Promotional Video/Reel", ''],
     ];
 
     const DEFAULTS = [
@@ -68,6 +71,7 @@ class HL_Referral {
             invites_required INTEGER NOT NULL,
             title TEXT NOT NULL,
             body TEXT,
+            fulfill_package TEXT,
             sort INTEGER DEFAULT 0,
             active INTEGER NOT NULL DEFAULT 1,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -79,13 +83,16 @@ class HL_Referral {
             tier_invites INTEGER,
             title TEXT NOT NULL,
             body TEXT,
-            status TEXT NOT NULL DEFAULT 'earned',   -- earned | approved | rejected
+            status TEXT NOT NULL DEFAULT 'earned',   -- earned | redeemed  (approved|rejected kept for legacy rows)
             source TEXT NOT NULL DEFAULT 'auto',      -- auto | manual
+            fulfill_package TEXT,                     -- promo package this reward grants when redeemed
+            promo_id INTEGER,                         -- the promotion created when the user redeemed it
             start_date TEXT,
             end_date TEXT,
             notes TEXT,
             decided_by INTEGER,
             decided_at DATETIME,
+            redeemed_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )");
         $this->db->exec("CREATE TABLE IF NOT EXISTS referral_audit (
@@ -108,6 +115,27 @@ class HL_Referral {
         if ($rcols && !in_array('group_joined_at', $rcols, true)) {
             $this->db->exec("ALTER TABLE referrals ADD COLUMN group_joined_at DATETIME");
         }
+        // referral_tiers.fulfill_package (added for reward auto-fulfillment; tiers
+        // created before this feature won't have it).
+        $tcols = [];
+        $tr = $this->db->query("PRAGMA table_info(referral_tiers)");
+        while ($tr && ($r = $tr->fetchArray(SQLITE3_ASSOC))) { $tcols[] = $r['name']; }
+        if ($tcols && !in_array('fulfill_package', $tcols, true)) {
+            $this->db->exec("ALTER TABLE referral_tiers ADD COLUMN fulfill_package TEXT");
+        }
+        // referral_rewards new columns (redemption -> promotion tracking).
+        $wcols = [];
+        $wr = $this->db->query("PRAGMA table_info(referral_rewards)");
+        while ($wr && ($r = $wr->fetchArray(SQLITE3_ASSOC))) { $wcols[] = $r['name']; }
+        if ($wcols && !in_array('fulfill_package', $wcols, true)) {
+            $this->db->exec("ALTER TABLE referral_rewards ADD COLUMN fulfill_package TEXT");
+        }
+        if ($wcols && !in_array('promo_id', $wcols, true)) {
+            $this->db->exec("ALTER TABLE referral_rewards ADD COLUMN promo_id INTEGER");
+        }
+        if ($wcols && !in_array('redeemed_at', $wcols, true)) {
+            $this->db->exec("ALTER TABLE referral_rewards ADD COLUMN redeemed_at DATETIME");
+        }
         // users.referral_code (added if the users table pre-dates this feature).
         $cols = [];
         $res = $this->db->query("PRAGMA table_info(users)");
@@ -120,11 +148,12 @@ class HL_Referral {
         if ($n === 0) {
             $i = 0;
             foreach (self::DEFAULT_TIERS as $t) {
-                $stmt = $this->db->prepare("INSERT INTO referral_tiers (invites_required,title,body,sort,active)
-                                            VALUES (:inv,:ti,:bo,:so,1)");
+                $stmt = $this->db->prepare("INSERT INTO referral_tiers (invites_required,title,body,fulfill_package,sort,active)
+                                            VALUES (:inv,:ti,:bo,:pk,:so,1)");
                 $stmt->bindValue(':inv', (int) $t[0], SQLITE3_INTEGER);
                 $stmt->bindValue(':ti', $t[1], SQLITE3_TEXT);
                 $stmt->bindValue(':bo', $t[2], SQLITE3_TEXT);
+                $stmt->bindValue(':pk', $t[3] ?? '', SQLITE3_TEXT);
                 $stmt->bindValue(':so', $i++, SQLITE3_INTEGER);
                 $stmt->execute();
             }
@@ -301,11 +330,40 @@ class HL_Referral {
         $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
         return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['c'] ?? 0);
     }
-    public function countQualified($telegramId) {   // count toward rewards
+    public function countQualified($telegramId) {   // lifetime successful invites
         $stmt = $this->db->prepare("SELECT COUNT(*) c FROM referrals
             WHERE referrer_id = :id AND status = 'qualified'");
         $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
         return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['c'] ?? 0);
+    }
+    // How many qualified invites this user has already "spent" earning rewards.
+    // Each reward the user has earned consumes its tier's required invites, so
+    // progress toward the NEXT reward resets after every claim. Legacy rejected
+    // rewards don't consume anything.
+    public function spentInvites($telegramId) {
+        $stmt = $this->db->prepare("SELECT COALESCE(SUM(tier_invites),0) s FROM referral_rewards
+            WHERE telegram_id = :id AND status <> 'rejected'");
+        $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
+        return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['s'] ?? 0);
+    }
+    // Qualified invites still available toward the next reward (lifetime minus spent).
+    public function availableInvites($telegramId) {
+        return max(0, $this->countQualified($telegramId) - $this->spentInvites($telegramId));
+    }
+    // How many rewards this user has earned so far (drives which tier is next).
+    public function rewardCount($telegramId) {
+        $stmt = $this->db->prepare("SELECT COUNT(*) c FROM referral_rewards
+            WHERE telegram_id = :id AND status <> 'rejected'");
+        $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
+        return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['c'] ?? 0);
+    }
+    // The tier the user is currently working toward: the next rung on the ladder,
+    // or the top tier once every rung has been claimed (so inviting keeps paying).
+    public function nextTier($telegramId) {
+        $tiers = $this->tiers(true);
+        if (!$tiers) return null;
+        $idx = min($this->rewardCount($telegramId), count($tiers) - 1);
+        return $tiers[$idx];
     }
     public function tiers($activeOnly = true) {
         $sql = "SELECT * FROM referral_tiers" . ($activeOnly ? " WHERE active=1" : "") . " ORDER BY invites_required ASC, sort ASC";
@@ -328,19 +386,27 @@ class HL_Referral {
         return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['c'] ?? 0);
     }
     // Full progress snapshot for the bot's "My Progress" screen.
+    // 'qualified' is the LIFETIME successful-invite count (Total Invites - never
+    // resets). 'available' is what counts toward the next reward and RESETS every
+    // time a reward is claimed. 'progress' is available capped at the next tier.
     public function progress($telegramId) {
-        $this->refreshQualifications();
-        $joined = $this->countJoined($telegramId);
+        // Settle + auto-earn any rewards first, so 'available'/'next' reflect the
+        // rewards already handed out.
+        $this->checkMilestones($telegramId);
+        $joined    = $this->countJoined($telegramId);
         $qualified = $this->countQualified($telegramId);
-        $tiers = $this->tiers(true);
-        $next = null;
-        foreach ($tiers as $t) {
-            if ($qualified < (int) $t['invites_required']) { $next = $t; break; }
-        }
-        $needed = $next ? max(0, (int) $next['invites_required'] - $qualified) : 0;
+        $spent     = $this->spentInvites($telegramId);
+        $available = max(0, $qualified - $spent);
+        $tiers     = $this->tiers(true);
+        $next      = $this->nextTier($telegramId);
+        $need      = $next ? (int) $next['invites_required'] : 0;
+        $needed    = $next ? max(0, $need - $available) : 0;
         return [
             'joined'         => $joined,
-            'qualified'      => $qualified,
+            'qualified'      => $qualified,   // lifetime successful (Total Invites)
+            'spent'          => $spent,
+            'available'      => $available,   // toward next reward (resets on claim)
+            'progress'       => $next ? min($available, $need) : $available,
             'awaiting_group' => $this->countAwaitingGroupJoin($telegramId),
             'tiers'          => $tiers,
             'next'           => $next,
@@ -383,27 +449,75 @@ class HL_Referral {
         $stmt->bindValue(':t', $tierId, SQLITE3_INTEGER);
         return (bool) $stmt->execute()->fetchArray(SQLITE3_ASSOC);
     }
-    // After qualification, create reward rows for any newly-reached tier. Returns
+    // Rewards this user has earned but not yet redeemed.
+    public function earnedRewards($telegramId) {
+        $stmt = $this->db->prepare("SELECT * FROM referral_rewards
+            WHERE telegram_id = :id AND status = 'earned' ORDER BY created_at ASC");
+        $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
+        $res = $stmt->execute();
+        $out = [];
+        while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $out[] = $r; }
+        return $out;
+    }
+    // The promo package a reward grants when redeemed (blank = manual fulfilment).
+    public function rewardPackage($reward) {
+        if (!empty($reward['fulfill_package'])) return (string) $reward['fulfill_package'];
+        // Fall back to the tier's configured package (older reward rows).
+        if (!empty($reward['tier_id'])) {
+            $t = $this->tier((int) $reward['tier_id']);
+            if ($t && !empty($t['fulfill_package'])) return (string) $t['fulfill_package'];
+        }
+        return '';
+    }
+    // Mark an earned reward as redeemed. Idempotent-ish: returns false if it was
+    // not in the 'earned' state (already redeemed / not found), so a double tap
+    // can never create two promotions from one reward.
+    public function markRewardRedeemed($rewardId, $promoId = null) {
+        $rw = $this->reward($rewardId);
+        if (!$rw || $rw['status'] !== 'earned') return false;
+        $stmt = $this->db->prepare("UPDATE referral_rewards
+            SET status='redeemed', promo_id=:pid, redeemed_at=CURRENT_TIMESTAMP
+            WHERE id=:id AND status='earned'");
+        $stmt->bindValue(':pid', $promoId, $promoId === null ? SQLITE3_NULL : SQLITE3_INTEGER);
+        $stmt->bindValue(':id', $rewardId, SQLITE3_INTEGER);
+        $stmt->execute();
+        if ($this->db->changes() < 1) return false;
+        $this->audit('user:' . $rw['telegram_id'], 'reward_redeemed', $rw['telegram_id'], $rewardId,
+            $rw['title'] . ($promoId ? ' -> promo ' . $promoId : ' (manual)'));
+        return true;
+    }
+    // Automatically earn any reward the user has now qualified for. Consumption
+    // model: each reward the user climbs to spends that tier's required invites,
+    // so progress resets and they must invite the required number of NEW eligible
+    // friends again for the following reward. Rewards are earned WITHOUT any admin
+    // approval - the group-join + settle rules already verify each invite. Returns
     // the list of newly-earned reward rows (for notifying the user).
     public function checkMilestones($telegramId) {
         $this->refreshQualifications();
-        $qualified = $this->countQualified($telegramId);
+        $tiers = $this->tiers(true);
+        if (!$tiers) return [];
         $newly = [];
-        foreach ($this->tiers(true) as $t) {
-            if ($qualified >= (int) $t['invites_required'] && !$this->hasRewardForTier($telegramId, $t['id'])) {
-                $stmt = $this->db->prepare("INSERT INTO referral_rewards
-                    (telegram_id, tier_id, tier_invites, title, body, status, source)
-                    VALUES (:id,:t,:inv,:ti,:bo,'earned','auto')");
-                $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
-                $stmt->bindValue(':t', $t['id'], SQLITE3_INTEGER);
-                $stmt->bindValue(':inv', (int) $t['invites_required'], SQLITE3_INTEGER);
-                $stmt->bindValue(':ti', $t['title'], SQLITE3_TEXT);
-                $stmt->bindValue(':bo', $t['body'], SQLITE3_TEXT);
-                $stmt->execute();
-                $rid = $this->db->lastInsertRowID();
-                $this->audit('system', 'reward_earned', $telegramId, $rid, $t['title'] . ' @ ' . $t['invites_required']);
-                $newly[] = $this->reward($rid);
-            }
+        // Award one reward per pass; the loop keeps going while enough available
+        // invites remain for the next rung (a guard caps runaway loops).
+        for ($guard = 0; $guard < 100; $guard++) {
+            $available = $this->availableInvites($telegramId);
+            $next = $this->nextTier($telegramId);
+            if (!$next) break;
+            $need = (int) $next['invites_required'];
+            if ($need <= 0 || $available < $need) break;
+            $stmt = $this->db->prepare("INSERT INTO referral_rewards
+                (telegram_id, tier_id, tier_invites, title, body, status, source, fulfill_package)
+                VALUES (:id,:t,:inv,:ti,:bo,'earned','auto',:pk)");
+            $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
+            $stmt->bindValue(':t', $next['id'], SQLITE3_INTEGER);
+            $stmt->bindValue(':inv', $need, SQLITE3_INTEGER);
+            $stmt->bindValue(':ti', $next['title'], SQLITE3_TEXT);
+            $stmt->bindValue(':bo', $next['body'], SQLITE3_TEXT);
+            $stmt->bindValue(':pk', (string) ($next['fulfill_package'] ?? ''), SQLITE3_TEXT);
+            $stmt->execute();
+            $rid = $this->db->lastInsertRowID();
+            $this->audit('system', 'reward_earned', $telegramId, $rid, $next['title'] . ' @ ' . $need);
+            $newly[] = $this->reward($rid);
         }
         return $newly;
     }
@@ -435,22 +549,26 @@ class HL_Referral {
         $this->audit('admin:' . $adminId, 'reward_rejected', $r['telegram_id'] ?? null, $rewardId, (string) $reason);
         return $r;
     }
-    // Manually grant a reward to a user WITHOUT them inviting anyone.
+    // Manually grant a reward to a user WITHOUT them inviting anyone. It's created
+    // as 'earned' so the user can redeem it (pick a date/time) exactly like an
+    // auto-earned reward. Note: a granted reward consumes no invites of its own -
+    // spentInvites counts it, so it also advances their reward ladder like any
+    // other reward (intended: a gift counts as one of their rewards).
     public function grantReward($telegramId, $tierId, $adminId, $startDate = null, $endDate = null, $notes = null) {
         $t = $this->tier($tierId);
         if (!$t) return null;
         $stmt = $this->db->prepare("INSERT INTO referral_rewards
-            (telegram_id, tier_id, tier_invites, title, body, status, source, start_date, end_date, notes, decided_by, decided_at)
-            VALUES (:id,:t,:inv,:ti,:bo,'approved','manual',:sd,:ed,:no,:by,CURRENT_TIMESTAMP)");
+            (telegram_id, tier_id, tier_invites, title, body, status, source, fulfill_package, start_date, end_date, notes)
+            VALUES (:id,:t,:inv,:ti,:bo,'earned','manual',:pk,:sd,:ed,:no)");
         $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
         $stmt->bindValue(':t', $tierId, SQLITE3_INTEGER);
         $stmt->bindValue(':inv', (int) $t['invites_required'], SQLITE3_INTEGER);
         $stmt->bindValue(':ti', $t['title'], SQLITE3_TEXT);
         $stmt->bindValue(':bo', $t['body'], SQLITE3_TEXT);
+        $stmt->bindValue(':pk', (string) ($t['fulfill_package'] ?? ''), SQLITE3_TEXT);
         $stmt->bindValue(':sd', $startDate, SQLITE3_TEXT);
         $stmt->bindValue(':ed', $endDate, SQLITE3_TEXT);
         $stmt->bindValue(':no', $notes, SQLITE3_TEXT);
-        $stmt->bindValue(':by', $adminId, SQLITE3_INTEGER);
         $stmt->execute();
         $rid = $this->db->lastInsertRowID();
         $this->audit('admin:' . $adminId, 'reward_granted', $telegramId, $rid, $t['title'] . ' (manual)');
@@ -472,19 +590,25 @@ class HL_Referral {
     }
 
     // ---- Tier management (admin) ----
-    public function addTier($invites, $title, $body) {
-        $stmt = $this->db->prepare("INSERT INTO referral_tiers (invites_required,title,body,sort,active)
-            VALUES (:inv,:ti,:bo,0,1)");
+    public function addTier($invites, $title, $body, $fulfillPackage = '') {
+        $stmt = $this->db->prepare("INSERT INTO referral_tiers (invites_required,title,body,fulfill_package,sort,active)
+            VALUES (:inv,:ti,:bo,:pk,0,1)");
         $stmt->bindValue(':inv', (int) $invites, SQLITE3_INTEGER);
         $stmt->bindValue(':ti', $title, SQLITE3_TEXT);
         $stmt->bindValue(':bo', $body, SQLITE3_TEXT);
+        $stmt->bindValue(':pk', (string) $fulfillPackage, SQLITE3_TEXT);
         $stmt->execute();
         $id = $this->db->lastInsertRowID();
         $this->audit('admin', 'tier_added', null, null, "#$id $title @ $invites");
         return $id;
     }
-    public function updateTier($id, $invites, $title, $body, $active) {
-        $stmt = $this->db->prepare("UPDATE referral_tiers SET invites_required=:inv,title=:ti,body=:bo,active=:ac WHERE id=:id");
+    public function updateTier($id, $invites, $title, $body, $active, $fulfillPackage = null) {
+        if ($fulfillPackage === null) {
+            $stmt = $this->db->prepare("UPDATE referral_tiers SET invites_required=:inv,title=:ti,body=:bo,active=:ac WHERE id=:id");
+        } else {
+            $stmt = $this->db->prepare("UPDATE referral_tiers SET invites_required=:inv,title=:ti,body=:bo,active=:ac,fulfill_package=:pk WHERE id=:id");
+            $stmt->bindValue(':pk', (string) $fulfillPackage, SQLITE3_TEXT);
+        }
         $stmt->bindValue(':inv', (int) $invites, SQLITE3_INTEGER);
         $stmt->bindValue(':ti', $title, SQLITE3_TEXT);
         $stmt->bindValue(':bo', $body, SQLITE3_TEXT);
@@ -545,8 +669,8 @@ class HL_Referral {
             'referrals'        => (int) $this->db->querySingle("SELECT COUNT(*) FROM referrals"),
             'qualified'        => (int) $this->db->querySingle("SELECT COUNT(*) FROM referrals WHERE status='qualified'"),
             'flagged'          => (int) $this->db->querySingle("SELECT COUNT(*) FROM referrals WHERE flagged=1"),
-            'rewards_pending'  => (int) $this->db->querySingle("SELECT COUNT(*) FROM referral_rewards WHERE status='earned'"),
-            'rewards_approved' => (int) $this->db->querySingle("SELECT COUNT(*) FROM referral_rewards WHERE status='approved'"),
+            'rewards_earned'   => (int) $this->db->querySingle("SELECT COUNT(*) FROM referral_rewards WHERE status='earned'"),
+            'rewards_redeemed' => (int) $this->db->querySingle("SELECT COUNT(*) FROM referral_rewards WHERE status IN ('redeemed','approved')"),
         ];
     }
 
@@ -637,10 +761,10 @@ function inviteEarnHome($userId) {
         "Invite your friends to {$gn} and earn incredible rewards that help your business grow.\n\n" .
         "<b>How Invite &amp; Earn Works</b>\n" .
         "1\xEF\xB8\x8F\xE2\x83\xA3 Invite friends using your referral link.\n" .
-        "2\xEF\xB8\x8F\xE2\x83\xA3 They join the {$gn} Telegram group.\n" .
-        "3\xEF\xB8\x8F\xE2\x83\xA3 They register and stay active.\n" .
-        "4\xEF\xB8\x8F\xE2\x83\xA3 Admin verifies and approves the invites.\n" .
-        "5\xEF\xB8\x8F\xE2\x83\xA3 You reach milestones and claim your rewards.",
+        "2\xEF\xB8\x8F\xE2\x83\xA3 They register and join the {$gn} Telegram group.\n" .
+        "3\xEF\xB8\x8F\xE2\x83\xA3 Each verified invite is counted automatically.\n" .
+        "4\xEF\xB8\x8F\xE2\x83\xA3 Reach a milestone and your reward unlocks instantly.\n" .
+        "5\xEF\xB8\x8F\xE2\x83\xA3 Redeem it, pick a date &amp; time, and it's scheduled just like a paid promotion.",
         inviteButtons());
 
     foreach ($newly as $rw) { inviteRewardUnlocked($userId, $rw); }
@@ -671,37 +795,47 @@ function inviteShowLink($userId) {
 function inviteShowProgress($userId) {
     global $tg, $referral;
     if (!inviteGuard($userId)) return;
-    $referral->checkMilestones($userId);
     $p = $referral->progress($userId);
 
     $next = $p['next'];
-    $ringTarget = $next ? (int) $next['invites_required'] : ($p['tiers'] ? (int) end($p['tiers'])['invites_required'] : 0);
-    $ring = $ringTarget > 0 ? "{$p['qualified']} / {$ringTarget}" : (string) $p['qualified'];
+    $avail = (int) $p['available'];
+    $ringTarget = $next ? (int) $next['invites_required'] : 0;
+    $ring = $ringTarget > 0 ? "{$avail} / {$ringTarget}" : (string) $avail;
 
     $msg  = "\xF0\x9F\x93\x88 <b>Your Progress</b>\n\n";
-    $msg .= "\xE2\xAD\x90 <b>{$ring}</b> qualified invites\n";
     if ($next) {
-        $msg .= "\xF0\x9F\x8E\xAF {$p['needed']} more invite" . ($p['needed'] === 1 ? '' : 's') . " until your next reward: <b>" . htmlspecialchars($next['title']) . "</b>\n";
+        $msg .= "\xF0\x9F\x8E\xAF <b>Progress to your next reward</b>\n";
+        $msg .= "\xE2\xAD\x90 <b>{$ring}</b> invites\n";
+        $msg .= "   " . inv_bar($avail, $ringTarget) . "\n";
+        $msg .= "\xF0\x9F\x8E\x81 Next reward: <b>" . htmlspecialchars($next['title']) . "</b>\n";
+        if ($p['needed'] > 0) {
+            $msg .= "\xF0\x9F\x91\x89 Invite <b>{$p['needed']}</b> more eligible friend" . ($p['needed'] === 1 ? '' : 's') . " to unlock it.\n";
+        } else {
+            $msg .= "\xE2\x9C\x85 Unlocked! Tap Rewards to redeem it.\n";
+        }
     } else {
-        $msg .= "\xF0\x9F\x8F\x86 You've reached the top reward tier. Amazing!\n";
+        $msg .= "\xF0\x9F\x8E\x81 Rewards aren't set up yet - check back soon!\n";
     }
-    $earned = 0;
-    foreach ($p['rewards'] as $rw) { if (in_array($rw['status'], ['earned','approved'], true)) $earned++; }
+
+    $redeemed = 0; $ready = 0;
+    foreach ($p['rewards'] as $rw) {
+        if ($rw['status'] === 'earned') $ready++;
+        elseif (in_array($rw['status'], ['redeemed','approved'], true)) $redeemed++;
+    }
     $msg .= "\n<b>Summary</b>\n";
-    $msg .= "\xE2\x80\xA2 Total invites joined: <b>{$p['joined']}</b>\n";
-    $msg .= "\xE2\x80\xA2 Successful (qualified) referrals: <b>{$p['qualified']}</b>\n";
+    $msg .= "\xE2\x80\xA2 Total invites (lifetime): <b>{$p['qualified']}</b>\n";
     if (!empty($p['awaiting_group'])) {
         $msg .= "\xE2\x80\xA2 Waiting to join the group: <b>{$p['awaiting_group']}</b>\n";
     }
-    $msg .= "\xE2\x80\xA2 Rewards earned: <b>{$earned}</b>\n\n";
+    $msg .= "\xE2\x80\xA2 Rewards ready to redeem: <b>{$ready}</b>\n";
+    $msg .= "\xE2\x80\xA2 Rewards claimed: <b>{$redeemed}</b>\n\n";
 
-    $msg .= "<b>Reward Milestones</b>\n";
+    $msg .= "<b>Reward Milestones</b> <i>(each one needs a fresh set of invites)</i>\n";
     foreach ($p['tiers'] as $t) {
         $need = (int) $t['invites_required'];
-        $done = $p['qualified'] >= $need;
+        $done = $avail >= $need;
         $mark = $done ? "\xE2\x9C\x85" : "\xE2\xAC\x9C";
-        $msg .= "{$mark} " . htmlspecialchars($t['title']) . " - " . min($p['qualified'], $need) . "/{$need}\n";
-        $msg .= "   " . inv_bar($p['qualified'], $need) . "\n";
+        $msg .= "{$mark} " . htmlspecialchars($t['title']) . " - " . $need . " invites\n";
     }
 
     // Referral history (recent).
@@ -738,12 +872,12 @@ function inviteShowRewards($userId) {
     global $tg, $referral;
     if (!inviteGuard($userId)) return;
     $referral->checkMilestones($userId);
-    $qualified = $referral->countQualified($userId);
+    $available = $referral->availableInvites($userId);
 
     $msg = "\xF0\x9F\x8E\x81 <b>Rewards You Can Earn</b>\n\n";
     foreach ($referral->tiers(true) as $t) {
         $need = (int) $t['invites_required'];
-        $done = $qualified >= $need;
+        $done = $available >= $need;
         $mark = $done ? "\xE2\x9C\x85" : "\xF0\x9F\x94\x92";
         $msg .= "{$mark} <b>{$need} Invites - " . htmlspecialchars($t['title']) . "</b>\n";
         foreach (explode("\n", (string) $t['body']) as $ln) {
@@ -751,37 +885,37 @@ function inviteShowRewards($userId) {
         }
         $msg .= "\n";
     }
+    $msg .= "<i>Each reward uses up the invites it costs - keep inviting to unlock the next one.</i>";
 
-    // Buttons: claim any earned-but-unclaimed reward.
+    // Buttons: redeem any earned-but-unredeemed reward.
     $rows = [];
-    foreach ($referral->rewardsFor($userId) as $rw) {
-        if ($rw['status'] === 'earned') {
-            $rows[] = [['text' => "\xF0\x9F\x8E\x89 Claim: " . mb_strimwidth($rw['title'], 0, 28, '...'),
-                       'callback_data' => 'inv_claim_' . $rw['id']]];
-        }
+    foreach ($referral->earnedRewards($userId) as $rw) {
+        $rows[] = [['text' => "\xF0\x9F\x8E\x89 Redeem: " . mb_strimwidth($rw['title'], 0, 26, '...'),
+                   'callback_data' => 'inv_redeem_' . $rw['id']]];
     }
     $rows[] = [['text' => "\xF0\x9F\x93\x8B View My Rewards", 'callback_data' => 'inv_myrewards']];
     $rows[] = [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'invite']];
     $tg->sendInlineButtons($userId, $msg, $rows);
 }
 
-// A freshly-unlocked reward (pushed proactively or from Rewards screen).
+// A freshly-unlocked reward (pushed proactively or from Rewards screen). The user
+// redeems it and picks a date/time; it's then scheduled just like a paid promotion.
 function inviteRewardUnlocked($userId, $rw) {
     global $tg;
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\x8E\x89 <b>Milestone Reached!</b>\n\n" .
-        "You reached {$rw['tier_invites']} invites!\n\n" .
+        "You earned <b>{$rw['tier_invites']}</b> qualified invites!\n\n" .
         "\xF0\x9F\x8E\x81 Reward Unlocked: <b>" . htmlspecialchars($rw['title']) . "</b>\n\n" .
-        "Would you like to use this reward now or choose a start date?",
+        "Redeem it now to set it up and schedule your promotion.",
         [
-            [['text' => "\xE2\x96\xB6\xEF\xB8\x8F Start Now",       'callback_data' => 'inv_start_' . $rw['id']]],
-            [['text' => "\xF0\x9F\x93\x85 Choose Start Date", 'callback_data' => 'inv_date_' . $rw['id']]],
-            [['text' => "\xF0\x9F\x92\xBE Save for Later",     'callback_data' => 'inv_save_' . $rw['id']]],
+            [['text' => "\xF0\x9F\x8E\x89 Redeem Now", 'callback_data' => 'inv_redeem_' . $rw['id']]],
+            [['text' => "\xF0\x9F\x93\x8B View My Rewards", 'callback_data' => 'inv_myrewards']],
             [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'inv_rewards']],
         ]);
 }
 
-// Screen 9 - claim a specific reward.
+// A reward tapped from the Rewards screen - route it into redemption.
+// (inviteRedeemReward lives in webhook.php where the promo engine is available.)
 function inviteClaimReward($userId, $rewardId) {
     global $tg, $referral;
     if (!inviteGuard($userId)) return;
@@ -790,69 +924,30 @@ function inviteClaimReward($userId, $rewardId) {
         $tg->sendMessage($userId, "Sorry, that reward could not be found.");
         return;
     }
+    if ($rw['status'] !== 'earned') { inviteViewMyRewards($userId); return; }
+    if (function_exists('inviteRedeemReward')) { inviteRedeemReward($userId, (int) $rewardId); return; }
     inviteRewardUnlocked($userId, $rw);
 }
 
-// Start Now / Save for Later.
+// Legacy callbacks from older messages (Start Now / Save / Choose Date) now all
+// funnel into the single redeem flow, so buttons left in old chats still work.
 function inviteRewardStartMode($userId, $rewardId, $mode) {
-    global $tg, $referral;
-    if (!inviteGuard($userId)) return;
-    $rw = $referral->reward($rewardId);
-    if (!$rw || (int) $rw['telegram_id'] !== (int) $userId) { $tg->sendMessage($userId, "Reward not found."); return; }
-
-    if ($mode === 'start') {
-        $today = (new DateTime('now'))->format('Y-m-d');
-        $referral->setRewardStartPreference($rewardId, 'start_now', $today);
-        $tg->sendInlineButtons($userId,
-            "\xE2\x9C\x85 <b>Great!</b> We've noted you'd like to start <b>" . htmlspecialchars($rw['title']) . "</b> right away.\n\n" .
-            "Our team will review and approve it shortly - you'll get a message once it's active.",
-            [[['text' => "\xF0\x9F\x93\x8B View My Rewards", 'callback_data' => 'inv_myrewards']],
-             [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
-    } else { // save
-        $referral->setRewardStartPreference($rewardId, 'save_later', null);
-        $tg->sendInlineButtons($userId,
-            "\xF0\x9F\x92\xBE Saved! You can start <b>" . htmlspecialchars($rw['title']) . "</b> whenever you're ready from View My Rewards.",
-            [[['text' => "\xF0\x9F\x93\x8B View My Rewards", 'callback_data' => 'inv_myrewards']],
-             [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
-    }
+    inviteClaimReward($userId, $rewardId);
 }
-
-// Choose Start Date - ask the user to type a date.
 function inviteRewardChooseDate($userId, $rewardId) {
-    global $tg, $db, $referral;
-    if (!inviteGuard($userId)) return;
-    $rw = $referral->reward($rewardId);
-    if (!$rw || (int) $rw['telegram_id'] !== (int) $userId) { $tg->sendMessage($userId, "Reward not found."); return; }
-    $db->setState($userId, 'inv_reward_date', ['reward_id' => (int) $rewardId]);
-    $tg->sendInlineButtons($userId,
-        "\xF0\x9F\x93\x85 When would you like <b>" . htmlspecialchars($rw['title']) . "</b> to start?\n\n" .
-        "Please type a date, e.g. <b>2026-08-01</b> or <b>Aug 1 2026</b>.",
-        [[['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'inv_claim_' . $rewardId]]]);
+    inviteClaimReward($userId, $rewardId);
 }
-
-// Handle the typed start date (called from the text state handler).
 function inviteRewardSaveDate($userId, $text, $state) {
-    global $tg, $db, $referral;
-    $rewardId = (int) ($state['data']['reward_id'] ?? 0);
-    $ts = strtotime($text);
-    if (!$ts) {
-        $tg->sendMessage($userId, "Sorry, I couldn't read that date. Please type it like <b>2026-08-01</b>:");
-        return;
-    }
-    $date = date('Y-m-d', $ts);
+    global $db;
     $db->setState($userId, 'idle', []);
-    $rw = $referral->setRewardStartPreference($rewardId, 'choose_date', $date);
-    $tg->sendInlineButtons($userId,
-        "\xE2\x9C\x85 Noted! You'd like <b>" . htmlspecialchars($rw['title'] ?? 'your reward') . "</b> to start on <b>{$date}</b>.\n\n" .
-        "Our team will review and approve it - you'll be notified once it's active.",
-        [[['text' => "\xF0\x9F\x93\x8B View My Rewards", 'callback_data' => 'inv_myrewards']],
-         [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+    inviteClaimReward($userId, (int) ($state['data']['reward_id'] ?? 0));
 }
 
 // Screen 10 - View My Rewards with status.
 function inviteViewMyRewards($userId) {
     global $tg, $referral;
     if (!inviteGuard($userId)) return;
+    $referral->checkMilestones($userId);
     $rewards = $referral->rewardsFor($userId);
     if (!$rewards) {
         $tg->sendInlineButtons($userId,
@@ -861,16 +956,26 @@ function inviteViewMyRewards($userId) {
              [['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'invite']]]);
         return;
     }
-    $labels = ['earned' => "\xE2\x8F\xB3 Pending approval", 'approved' => "\xE2\x9C\x85 Approved", 'rejected' => "\xE2\x9D\x8C Not approved"];
+    $labels = [
+        'earned'   => "\xF0\x9F\x8E\x81 Ready to redeem",
+        'redeemed' => "\xE2\x9C\x85 Redeemed - scheduled",
+        'approved' => "\xE2\x9C\x85 Active",
+        'rejected' => "\xE2\x9D\x8C Not approved",
+    ];
     $msg = "\xF0\x9F\x93\x8B <b>My Rewards</b>\n\n";
+    $rows = [];
     foreach ($rewards as $rw) {
-        $st = $labels[$rw['status']] ?? $rw['status'];
+        $st = $labels[$rw['status']] ?? ucfirst((string) $rw['status']);
         $msg .= "\xF0\x9F\x8E\x81 <b>" . htmlspecialchars($rw['title']) . "</b>\n";
         $msg .= "   Status: {$st}\n";
         if ($rw['start_date']) $msg .= "   Start: " . htmlspecialchars($rw['start_date']) . ($rw['end_date'] ? " \xE2\x86\x92 " . htmlspecialchars($rw['end_date']) : '') . "\n";
         $msg .= "\n";
+        if ($rw['status'] === 'earned') {
+            $rows[] = [['text' => "\xF0\x9F\x8E\x89 Redeem: " . mb_strimwidth($rw['title'], 0, 26, '...'),
+                       'callback_data' => 'inv_redeem_' . $rw['id']]];
+        }
     }
-    $tg->sendInlineButtons($userId, $msg,
-        [[['text' => "\xF0\x9F\x8E\x81 Rewards", 'callback_data' => 'inv_rewards']],
-         [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+    $rows[] = [['text' => "\xF0\x9F\x8E\x81 Rewards", 'callback_data' => 'inv_rewards']];
+    $rows[] = [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']];
+    $tg->sendInlineButtons($userId, $msg, $rows);
 }

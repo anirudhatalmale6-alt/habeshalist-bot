@@ -157,6 +157,7 @@ function handleCallbackQuery($query) {
     if ($data === 'inv_progress') { inviteShowProgress($userId); return; }
     if ($data === 'inv_rewards')  { inviteShowRewards($userId); return; }
     if ($data === 'inv_myrewards'){ inviteViewMyRewards($userId); return; }
+    if (strpos($data, 'inv_redeem_') === 0) { inviteRedeemReward($userId, (int) substr($data, 11)); return; }
     if (strpos($data, 'inv_claim_') === 0) { inviteClaimReward($userId, (int) substr($data, 10)); return; }
     if (strpos($data, 'inv_start_') === 0) { inviteRewardStartMode($userId, (int) substr($data, 10), 'start'); return; }
     if (strpos($data, 'inv_save_')  === 0) { inviteRewardStartMode($userId, (int) substr($data, 9), 'save'); return; }
@@ -1092,13 +1093,46 @@ function userInGroup($userId) {
     }
 }
 
+// A working "join the group" link. Prefers the admin-set invite link; if that's
+// missing/invalid, asks Telegram for a real invite link for the configured group
+// and caches it. This fixes "This group is unavailable" when the stored link was
+// a username link to a private group or an expired invite.
+function groupJoinLink() {
+    global $tg, $db;
+    // 1) Admin-set link wins (they may want a specific named/approval link).
+    $stored = trim((string) $db->getSetting('group_invite_link', ''));
+    if ($stored !== '' && preg_match('#^https?://#i', $stored)) return $stored;
+    // 2) A previously auto-generated link we cached.
+    $cached = trim((string) $db->getSetting('group_invite_link_auto', ''));
+    if ($cached !== '' && preg_match('#^https?://#i', $cached)) return $cached;
+    // 3) Generate one from the group chat id (bot must be admin with invite rights).
+    $chat = trim((string) $db->getSetting('sched_group_chat_id', ''));
+    if ($chat === '') return '';
+    foreach (['createChatInviteLink', 'exportChatInviteLink'] as $method) {
+        try {
+            $res = $tg->callApi($method, ['chat_id' => $chat]);
+            $link = '';
+            if (!empty($res['ok'])) {
+                $link = is_array($res['result'] ?? null)
+                    ? (string) ($res['result']['invite_link'] ?? '')
+                    : (string) ($res['result'] ?? '');
+            }
+            if ($link !== '' && preg_match('#^https?://#i', $link)) {
+                $db->setSetting('group_invite_link_auto', $link);
+                return $link;
+            }
+        } catch (\Throwable $e) { /* try next method */ }
+    }
+    return $stored; // last resort (may be a username link)
+}
+
 // DM an invited user asking them to join the group to complete their friend's invite.
 function inviteGroupJoinPrompt($userId) {
     global $tg, $db;
     $gname = trim((string) $db->getSetting('group_name', 'HabeshaList'));
     if ($gname === '') $gname = 'HabeshaList';
     $gnameH = htmlspecialchars($gname);
-    $link = trim((string) $db->getSetting('group_invite_link', ''));
+    $link = groupJoinLink();
     $rows = [];
     if ($link !== '' && preg_match('#^https?://#i', $link)) {
         $rows[] = [['text' => "\xF0\x9F\x91\xA5 Join {$gname}", 'url' => $link]];
@@ -1126,7 +1160,7 @@ function inviteVerifyGroupJoin($userId) {
     if (!userInGroup($userId)) {
         $gname = trim((string) $db->getSetting('group_name', 'HabeshaList'));
         if ($gname === '') $gname = 'HabeshaList';
-        $link = trim((string) $db->getSetting('group_invite_link', ''));
+        $link = groupJoinLink();
         $rows = [];
         if ($link !== '' && preg_match('#^https?://#i', $link)) {
             $rows[] = [['text' => "\xF0\x9F\x91\xA5 Join {$gname}", 'url' => $link]];
@@ -2024,7 +2058,7 @@ function startRegistration($userId, $intendedAction = '', $refCode = '') {
     $db->setState($userId, 'reg_name', ['intended_action' => $intendedAction, 'ref_code' => $refCode]);
     $tg->sendMessage($userId,
         "\xF0\x9F\x91\x8B Welcome to HabeshaList.com!\n\n" .
-        "Before you can post, let's create your free account.\n\n" .
+        "Before we start, let's create your free account.\n\n" .
         "\xF0\x9F\x93\x9D Please enter your <b>full name</b>:"
     );
 }
