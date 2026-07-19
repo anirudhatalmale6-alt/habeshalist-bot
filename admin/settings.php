@@ -118,8 +118,21 @@ if ($flash) hl_flash($flash, $flashType);
 
     <div class="row"><div class="field">
       <label>Group invite link</label>
-      <input type="text" name="group_invite_link" value="<?= h(hl_get_setting('group_invite_link', '')) ?>" placeholder="https://t.me/YourGroup" spellcheck="false">
-      <div class="muted small" style="margin-top:5px">Open your group in Telegram, tap the group name, then Invite Link, and paste it here. Shown as a "Join" button to newly-referred users. Leave blank to hide it.</div>
+      <input type="text" name="group_invite_link" value="<?= h(hl_get_setting('group_invite_link', '')) ?>" placeholder="https://t.me/+AbCdEf... (or leave blank)" spellcheck="false">
+      <div class="muted small" style="margin-top:5px">
+        Best to <b>leave this blank</b> &ndash; the bot will generate a working join link automatically (the bot just needs to be an admin of the group with the "Invite Users via Link" right).
+        If you do paste one, use the group's <b>Invite Link</b> (looks like <span class="mono">https://t.me/+&hellip;</span>), not a message link. Links like <span class="mono">t.me/c/&hellip;</span> cause "This group is unavailable".
+      </div>
+      <?php
+        $glink = trim(hl_get_setting('group_invite_link', ''));
+        $glOk = $glink === '' ||
+            preg_match('#^https?://t\.me/(\+[A-Za-z0-9_-]+|joinchat/[A-Za-z0-9_-]+|[A-Za-z][A-Za-z0-9_]{3,})$#i', $glink);
+        if ($glink !== '' && !$glOk):
+      ?>
+        <div class="small" style="margin-top:6px;color:#b45309">
+          &#9888; This doesn't look like a join link, so the bot is ignoring it and using an auto-generated one instead. Clear this field, or replace it with a proper <span class="mono">https://t.me/+&hellip;</span> invite link.
+        </div>
+      <?php endif; ?>
     </div></div>
 
     <button type="submit">Save group settings</button>

@@ -1093,24 +1093,41 @@ function userInGroup($userId) {
     }
 }
 
-// A working "join the group" link. Prefers the admin-set invite link; if that's
-// missing/invalid, asks Telegram for a real invite link for the configured group
-// and caches it. This fixes "This group is unavailable" when the stored link was
-// a username link to a private group or an expired invite.
-function groupJoinLink() {
+// True only for links Telegram lets a NON-member open to join the group.
+// Rejects the two links that trigger "This group is unavailable":
+//   - t.me/c/<internal_id>/...  (private-group internal links, members only)
+//   - t.me/<username>/<msg_id>  (message deep-links, not join links)
+// Accepts: t.me/+HASH and t.me/joinchat/HASH (invite links) and a bare public
+// username t.me/<username> (only works if the group is public, but harmless).
+function isJoinableLink($url) {
+    $url = trim((string) $url);
+    if ($url === '' || !preg_match('#^https?://t\.me/#i', $url)) return false;
+    $path = rtrim(preg_replace('#^https?://t\.me/#i', '', $url), '/');
+    if ($path === '') return false;
+    if (strpos($path, '/') !== false) {
+        // Only the old-style invite link may contain a slash.
+        return (bool) preg_match('#^joinchat/[A-Za-z0-9_-]+$#i', $path);
+    }
+    if ($path[0] === '+') return strlen($path) > 1;                 // t.me/+HASH
+    if (strcasecmp($path, 'c') === 0) return false;                 // t.me/c
+    return (bool) preg_match('#^[A-Za-z][A-Za-z0-9_]{3,}$#', $path); // public @username
+}
+
+// Ask Telegram for a real, permanent invite link for the configured group and
+// cache it. Requires the bot to be an ADMIN of the group with the "Invite Users
+// via Link" right. Returns '' if that isn't the case.
+function generateGroupInviteLink() {
     global $tg, $db;
-    // 1) Admin-set link wins (they may want a specific named/approval link).
-    $stored = trim((string) $db->getSetting('group_invite_link', ''));
-    if ($stored !== '' && preg_match('#^https?://#i', $stored)) return $stored;
-    // 2) A previously auto-generated link we cached.
-    $cached = trim((string) $db->getSetting('group_invite_link_auto', ''));
-    if ($cached !== '' && preg_match('#^https?://#i', $cached)) return $cached;
-    // 3) Generate one from the group chat id (bot must be admin with invite rights).
     $chat = trim((string) $db->getSetting('sched_group_chat_id', ''));
     if ($chat === '') return '';
     foreach (['createChatInviteLink', 'exportChatInviteLink'] as $method) {
         try {
-            $res = $tg->callApi($method, ['chat_id' => $chat]);
+            $params = ['chat_id' => $chat];
+            if ($method === 'createChatInviteLink') {
+                $params['name'] = 'Invite & Earn';
+                $params['creates_join_request'] = false;
+            }
+            $res = $tg->callApi($method, $params);
             $link = '';
             if (!empty($res['ok'])) {
                 $link = is_array($res['result'] ?? null)
@@ -1123,7 +1140,27 @@ function groupJoinLink() {
             }
         } catch (\Throwable $e) { /* try next method */ }
     }
-    return $stored; // last resort (may be a username link)
+    return '';
+}
+
+// A working "join the group" link. The admin-set link is honoured only when it's
+// actually a join link; otherwise we self-heal with a bot-generated invite link
+// so a pasted internal/message link never causes "This group is unavailable".
+function groupJoinLink() {
+    global $db;
+    // 1) Admin override, but ONLY if it's a real join link (not t.me/c/ or a
+    //    message link). This is what caused the reported "unavailable" error.
+    $stored = trim((string) $db->getSetting('group_invite_link', ''));
+    if (isJoinableLink($stored)) return $stored;
+    // 2) A bot invite link we generated earlier (known good, stable).
+    $cached = trim((string) $db->getSetting('group_invite_link_auto', ''));
+    if (isJoinableLink($cached)) return $cached;
+    // 3) Generate a fresh one from the group chat id (bot must be admin).
+    $auto = generateGroupInviteLink();
+    if ($auto !== '') return $auto;
+    // 4) Nothing usable — return '' so callers show only the "I've Joined" button
+    //    rather than a broken link.
+    return '';
 }
 
 // DM an invited user asking them to join the group to complete their friend's invite.
