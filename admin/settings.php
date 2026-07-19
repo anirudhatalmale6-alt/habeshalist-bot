@@ -14,19 +14,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $form = $_POST['form'] ?? 'schedule';
 
     if ($form === 'group') {
-        // Group identity + public invite link (shown to users in the bot).
+        // Community display name (shown to users in the bot).
         $groupName = trim($_POST['group_name'] ?? '');
-        $groupLink = trim($_POST['group_invite_link'] ?? '');
-        if ($groupLink !== '' && !preg_match('#^https?://#i', $groupLink)) {
-            $errs[] = 'Group invite link must be a full link starting with https:// (e.g. https://t.me/YourGroup).';
-        }
-        if ($errs) {
-            $flash = implode(' ', $errs); $flashType = 'err';
-        } else {
-            hl_set_setting('group_name', $groupName);
-            hl_set_setting('group_invite_link', $groupLink);
-            $flash = 'Group settings saved. The bot uses them on its next run.';
-        }
+        hl_set_setting('group_name', $groupName);
+        $flash = 'Group name saved. The bot uses it on its next run.';
     } else {
         $group = trim($_POST['sched_group_chat_id'] ?? '');
         if ($group === '') $errs[] = 'Group chat id / username cannot be empty.';
@@ -104,8 +95,8 @@ if ($flash) hl_flash($flash, $flashType);
 </div>
 
 <div class="card">
-  <h2>Group name &amp; invite link</h2>
-  <p class="sub">Shown to users inside the bot - the display name for your community and the public link people tap to join your Telegram group (for example in the Invite &amp; Earn welcome). Leave the link blank to hide the join button.</p>
+  <h2>Group name</h2>
+  <p class="sub">The display name for your community, shown to users inside the bot (for example in the Invite &amp; Earn welcome).</p>
   <form method="post">
     <input type="hidden" name="csrf" value="<?= $csrf ?>">
     <input type="hidden" name="form" value="group">
@@ -116,13 +107,7 @@ if ($flash) hl_flash($flash, $flashType);
       <div class="muted small" style="margin-top:5px">Used wherever the bot mentions your community by name.</div>
     </div></div>
 
-    <div class="row"><div class="field">
-      <label>Group invite link</label>
-      <input type="text" name="group_invite_link" value="<?= h(hl_get_setting('group_invite_link', '')) ?>" placeholder="https://t.me/YourGroup" spellcheck="false">
-      <div class="muted small" style="margin-top:5px">Open your group in Telegram, tap the group name, then Invite Link, and paste it here. A "Join Our Group" button appears in the bot when this is set.</div>
-    </div></div>
-
-    <button type="submit">Save group settings</button>
+    <button type="submit">Save group name</button>
   </form>
 </div>
 

@@ -551,8 +551,7 @@ function inviteGuard($userId) {
 }
 
 function inviteButtons() {
-    global $referral;
-    $rows = [
+    return [
         [
             ['text' => "\xF0\x9F\x94\x97 My Referral Link", 'callback_data' => 'inv_link'],
             ['text' => "\xF0\x9F\x93\x88 My Progress",      'callback_data' => 'inv_progress'],
@@ -562,14 +561,6 @@ function inviteButtons() {
             ['text' => "\xF0\x9F\x8F\xA0 Main Menu",        'callback_data' => 'main_menu'],
         ],
     ];
-    // Optional "Join Our Group" button - shown only when an admin has set the
-    // group's public invite link in the panel. Telegram rejects url buttons
-    // with an empty/invalid href, so we only add it for a real https link.
-    $link = $referral ? trim((string) $referral->setting('group_invite_link', '')) : '';
-    if ($link !== '' && preg_match('#^https?://#i', $link)) {
-        array_splice($rows, 1, 0, [[['text' => "\xF0\x9F\x91\xA5 Join Our Group", 'url' => $link]]]);
-    }
-    return $rows;
 }
 
 // Screen 2 - Welcome / How it works.
