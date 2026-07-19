@@ -1136,6 +1136,7 @@ function generateGroupInviteLink() {
             }
             if ($link !== '' && preg_match('#^https?://#i', $link)) {
                 $db->setSetting('group_invite_link_auto', $link);
+                $db->setSetting('group_invite_link_auto_chat', $chat);
                 return $link;
             }
         } catch (\Throwable $e) { /* try next method */ }
@@ -1152,9 +1153,14 @@ function groupJoinLink() {
     //    message link). This is what caused the reported "unavailable" error.
     $stored = trim((string) $db->getSetting('group_invite_link', ''));
     if (isJoinableLink($stored)) return $stored;
-    // 2) A bot invite link we generated earlier (known good, stable).
-    $cached = trim((string) $db->getSetting('group_invite_link_auto', ''));
-    if (isJoinableLink($cached)) return $cached;
+    // 2) A bot invite link we generated earlier (known good, stable) - but only
+    //    if it was generated for the group currently configured. This is what
+    //    lets the client switch test<->production groups from the admin panel:
+    //    change the group chat id and the old cached link is ignored, not reused.
+    $chatNow  = trim((string) $db->getSetting('sched_group_chat_id', ''));
+    $cached   = trim((string) $db->getSetting('group_invite_link_auto', ''));
+    $cachedFor = trim((string) $db->getSetting('group_invite_link_auto_chat', ''));
+    if (isJoinableLink($cached) && $cachedFor !== '' && $cachedFor === $chatNow) return $cached;
     // 3) Generate a fresh one from the group chat id (bot must be admin).
     $auto = generateGroupInviteLink();
     if ($auto !== '') return $auto;
