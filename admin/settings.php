@@ -11,28 +11,45 @@ $flash = null; $flashType = 'ok';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     hl_csrf_check();
     $errs = [];
+    $form = $_POST['form'] ?? 'schedule';
 
-    $group = trim($_POST['sched_group_chat_id'] ?? '');
-    if ($group === '') $errs[] = 'Group chat id / username cannot be empty.';
-
-    $tz = trim($_POST['sched_tz'] ?? '');
-    if (!in_array($tz, timezone_identifiers_list(), true)) $errs[] = 'That timezone is not recognised.';
-
-    $times = [];
-    foreach (['sched_slot_morning', 'sched_slot_lunch', 'sched_slot_evening'] as $sk) {
-        $v = trim($_POST[$sk] ?? '');
-        if (!preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $v)) $errs[] = HL_SCHED[$sk]['label'] . ' must be a 24h time like 08:30.';
-        $times[$sk] = $v;
-    }
-
-    if ($errs) {
-        $flash = implode(' ', $errs); $flashType = 'err';
+    if ($form === 'group') {
+        // Group identity + public invite link (shown to users in the bot).
+        $groupName = trim($_POST['group_name'] ?? '');
+        $groupLink = trim($_POST['group_invite_link'] ?? '');
+        if ($groupLink !== '' && !preg_match('#^https?://#i', $groupLink)) {
+            $errs[] = 'Group invite link must be a full link starting with https:// (e.g. https://t.me/YourGroup).';
+        }
+        if ($errs) {
+            $flash = implode(' ', $errs); $flashType = 'err';
+        } else {
+            hl_set_setting('group_name', $groupName);
+            hl_set_setting('group_invite_link', $groupLink);
+            $flash = 'Group settings saved. The bot uses them on its next run.';
+        }
     } else {
-        hl_set_setting('sched_group_chat_id', $group);
-        hl_set_setting('sched_tz', $tz);
-        foreach ($times as $sk => $v) hl_set_setting($sk, $v);
-        hl_set_setting('sched_enabled', isset($_POST['sched_enabled']) ? '1' : '0');
-        $flash = 'Schedule settings saved. The scheduler uses them on its next run.';
+        $group = trim($_POST['sched_group_chat_id'] ?? '');
+        if ($group === '') $errs[] = 'Group chat id / username cannot be empty.';
+
+        $tz = trim($_POST['sched_tz'] ?? '');
+        if (!in_array($tz, timezone_identifiers_list(), true)) $errs[] = 'That timezone is not recognised.';
+
+        $times = [];
+        foreach (['sched_slot_morning', 'sched_slot_lunch', 'sched_slot_evening'] as $sk) {
+            $v = trim($_POST[$sk] ?? '');
+            if (!preg_match('/^([01]\d|2[0-3]):[0-5]\d$/', $v)) $errs[] = HL_SCHED[$sk]['label'] . ' must be a 24h time like 08:30.';
+            $times[$sk] = $v;
+        }
+
+        if ($errs) {
+            $flash = implode(' ', $errs); $flashType = 'err';
+        } else {
+            hl_set_setting('sched_group_chat_id', $group);
+            hl_set_setting('sched_tz', $tz);
+            foreach ($times as $sk => $v) hl_set_setting($sk, $v);
+            hl_set_setting('sched_enabled', isset($_POST['sched_enabled']) ? '1' : '0');
+            $flash = 'Schedule settings saved. The scheduler uses them on its next run.';
+        }
     }
 }
 
@@ -47,6 +64,7 @@ if ($flash) hl_flash($flash, $flashType);
   <p class="sub">Where promotions post, in which timezone, and at what times. Three slots a day, one post per slot. Changes apply on the scheduler's next run.</p>
   <form method="post">
     <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="schedule">
 
     <div class="row"><div class="field">
       <label><?= h(HL_SCHED['sched_group_chat_id']['label']) ?></label>
@@ -82,6 +100,29 @@ if ($flash) hl_flash($flash, $flashType);
     </div></div>
 
     <button type="submit">Save schedule settings</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Group name &amp; invite link</h2>
+  <p class="sub">Shown to users inside the bot - the display name for your community and the public link people tap to join your Telegram group (for example in the Invite &amp; Earn welcome). Leave the link blank to hide the join button.</p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="group">
+
+    <div class="row"><div class="field">
+      <label>Group name</label>
+      <input type="text" name="group_name" value="<?= h(hl_get_setting('group_name', 'HabeshaList')) ?>" placeholder="HabeshaList" spellcheck="false">
+      <div class="muted small" style="margin-top:5px">Used wherever the bot mentions your community by name.</div>
+    </div></div>
+
+    <div class="row"><div class="field">
+      <label>Group invite link</label>
+      <input type="text" name="group_invite_link" value="<?= h(hl_get_setting('group_invite_link', '')) ?>" placeholder="https://t.me/YourGroup" spellcheck="false">
+      <div class="muted small" style="margin-top:5px">Open your group in Telegram, tap the group name, then Invite Link, and paste it here. A "Join Our Group" button appears in the bot when this is set.</div>
+    </div></div>
+
+    <button type="submit">Save group settings</button>
   </form>
 </div>
 

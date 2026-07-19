@@ -551,7 +551,8 @@ function inviteGuard($userId) {
 }
 
 function inviteButtons() {
-    return [
+    global $referral;
+    $rows = [
         [
             ['text' => "\xF0\x9F\x94\x97 My Referral Link", 'callback_data' => 'inv_link'],
             ['text' => "\xF0\x9F\x93\x88 My Progress",      'callback_data' => 'inv_progress'],
@@ -561,6 +562,14 @@ function inviteButtons() {
             ['text' => "\xF0\x9F\x8F\xA0 Main Menu",        'callback_data' => 'main_menu'],
         ],
     ];
+    // Optional "Join Our Group" button - shown only when an admin has set the
+    // group's public invite link in the panel. Telegram rejects url buttons
+    // with an empty/invalid href, so we only add it for a real https link.
+    $link = $referral ? trim((string) $referral->setting('group_invite_link', '')) : '';
+    if ($link !== '' && preg_match('#^https?://#i', $link)) {
+        array_splice($rows, 1, 0, [[['text' => "\xF0\x9F\x91\xA5 Join Our Group", 'url' => $link]]]);
+    }
+    return $rows;
 }
 
 // Screen 2 - Welcome / How it works.
@@ -573,13 +582,16 @@ function inviteEarnHome($userId) {
 
     $usaOnly = (string) $referral->setting('referral_usa_only', '0') === '1';
     $usaLine = $usaOnly ? "\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8 Available to users in the USA.\n\n" : '';
+    $groupName = trim((string) $referral->setting('group_name', 'HabeshaList'));
+    if ($groupName === '') $groupName = 'HabeshaList';
+    $gn = htmlspecialchars($groupName);
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\x8E\x81 <b>Welcome to Invite &amp; Earn!</b>\n\n" .
         $usaLine .
-        "Invite your friends to HabeshaList and earn incredible rewards that help your business grow.\n\n" .
+        "Invite your friends to {$gn} and earn incredible rewards that help your business grow.\n\n" .
         "<b>How Invite &amp; Earn Works</b>\n" .
         "1\xEF\xB8\x8F\xE2\x83\xA3 Invite friends using your referral link.\n" .
-        "2\xEF\xB8\x8F\xE2\x83\xA3 They join the HabeshaList Telegram group.\n" .
+        "2\xEF\xB8\x8F\xE2\x83\xA3 They join the {$gn} Telegram group.\n" .
         "3\xEF\xB8\x8F\xE2\x83\xA3 They register and stay active.\n" .
         "4\xEF\xB8\x8F\xE2\x83\xA3 Admin verifies and approves the invites.\n" .
         "5\xEF\xB8\x8F\xE2\x83\xA3 You reach milestones and claim your rewards.",
