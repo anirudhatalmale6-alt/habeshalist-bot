@@ -509,9 +509,16 @@ function handleMessage($msg) {
         }
 
         if ($isRefCode) {
-            // Existing members can't be "referred" - codes only apply to new users.
-            $tg->sendMessage($userId, "\xF0\x9F\x91\x8B You're already a HabeshaList member, so this invite link doesn't apply to your account - but you can invite your own friends and earn rewards!");
-            showMainMenu($userId, $user['name']);
+            // An existing member can STILL be referred - but only to grow the
+            // community. If they've never joined the Telegram group, their friend's
+            // invite counts once they join. If they're already in the group (or the
+            // group-join rule is off), the link simply doesn't apply to their account.
+            if ($referral && $referral->requiresGroupJoin()) {
+                referralAttributeExistingUser($userId, $param, $user);
+            } else {
+                $tg->sendMessage($userId, "\xF0\x9F\x91\x8B You're already a HabeshaList member, so this invite link doesn't apply to your account - but you can invite your own friends and earn rewards!");
+                showMainMenu($userId, $user['name']);
+            }
         } elseif ($param) {
             handleAction($userId, $param);
         } else {
@@ -1010,6 +1017,61 @@ function referralAttributeNewUser($userId, $refCode, $stateData) {
         // Did that push them over a milestone (e.g. when the settle window is 0)?
         foreach ($referral->checkMilestones($referrerId) as $rw) { inviteRewardUnlocked($referrerId, $rw); }
     } catch (\Throwable $e) { /* never block registration on referral errors */ }
+}
+
+// An EXISTING bot user tapped a friend's referral link. Unlike a brand-new user
+// they're already registered - but the community still benefits when they join the
+// group, so we credit the inviter once this user joins the Telegram group. The
+// link is DECLINED only if they're already in the group or were already referred
+// by someone else. Only reached when the group-join rule is active.
+function referralAttributeExistingUser($userId, $refCode, $user) {
+    global $tg, $referral;
+    $name = $user['name'] ?? 'there';
+    if (!$referral) { showMainMenu($userId, $name); return; }
+    try {
+        // Already part of the community? Nothing to gain - decline politely.
+        if (userInGroup($userId)) {
+            $tg->sendMessage($userId, "\xF0\x9F\x91\x8B You're already in our Telegram group, so this invite link doesn't apply to your account - but you can invite your own friends and earn rewards!");
+            showMainMenu($userId, $name);
+            return;
+        }
+
+        $referrerId = $referral->codeOwner($refCode);
+        list($ok, $why) = $referral->attribute(
+            $userId, $refCode,
+            $name, $user['phone'] ?? '', $user['email'] ?? ''
+        );
+
+        if (!$ok || !$referrerId) {
+            if ($why === 'already_referred') {
+                $tg->sendMessage($userId, "\xF0\x9F\x91\x8B You've already been invited before, so this link doesn't apply - but you can invite your own friends and earn rewards!");
+            } elseif ($why === 'self') {
+                $tg->sendMessage($userId, "\xF0\x9F\x98\x85 You can't use your own referral link - but share it with friends to earn rewards!");
+            }
+            // feature_off / bad_code / error: stay quiet and just show the menu.
+            showMainMenu($userId, $name);
+            return;
+        }
+
+        // Recorded. Let the inviter know, then ask this user to join the group to
+        // complete the invite (mirrors the brand-new-user flow).
+        $friend = htmlspecialchars($name);
+        if ($why === 'flagged') {
+            $note = "\xF0\x9F\x91\x80 Someone used your invite link but needs a quick review before it counts.";
+            $tg->sendInlineButtons($referrerId, $note,
+                [[['text' => "\xF0\x9F\x93\x88 My Progress", 'callback_data' => 'inv_progress']]]);
+            $tg->sendMessage($userId, "Thanks! We just need a quick review, then you're all set.");
+            showMainMenu($userId, $name);
+            return;
+        }
+
+        $note = "\xF0\x9F\x8E\x89 <b>{$friend}</b> used your invite link! It'll count toward your rewards once they join the group and settle in.";
+        $tg->sendInlineButtons($referrerId, $note,
+            [[['text' => "\xF0\x9F\x93\x88 My Progress", 'callback_data' => 'inv_progress']]]);
+        inviteGroupJoinPrompt($userId);
+    } catch (\Throwable $e) {
+        showMainMenu($userId, $name);
+    }
 }
 
 // True when a user is currently a member of the configured Telegram group.
