@@ -31,9 +31,10 @@ class HL_Referral {
     ];
 
     const DEFAULTS = [
-        'invite_earn_enabled'   => '1',   // feature master switch
-        'referral_qualify_days' => '7',   // days a referral must settle before it counts
-        'referral_usa_only'     => '0',   // informational gate shown in the bot copy
+        'invite_earn_enabled'       => '1',   // feature master switch
+        'referral_qualify_days'     => '7',   // days a referral must settle before it counts
+        'referral_usa_only'         => '0',   // informational gate shown in the bot copy
+        'referral_require_group_join' => '1', // referral only counts once the friend joins the group
     ];
 
     public function __construct($dbPath) {
@@ -55,6 +56,8 @@ class HL_Referral {
             status TEXT NOT NULL DEFAULT 'registered',   -- registered | qualified | rejected
             flagged INTEGER NOT NULL DEFAULT 0,
             flag_reason TEXT,
+            group_joined INTEGER NOT NULL DEFAULT 0,
+            group_joined_at DATETIME,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             registered_at DATETIME,
             qualifies_at DATETIME,
@@ -94,6 +97,17 @@ class HL_Referral {
             ref_id INTEGER,
             detail TEXT
         )");
+        // referrals.group_joined (added for the "must join the group" rule; tables
+        // created before this feature won't have it).
+        $rcols = [];
+        $rr = $this->db->query("PRAGMA table_info(referrals)");
+        while ($rr && ($r = $rr->fetchArray(SQLITE3_ASSOC))) { $rcols[] = $r['name']; }
+        if ($rcols && !in_array('group_joined', $rcols, true)) {
+            $this->db->exec("ALTER TABLE referrals ADD COLUMN group_joined INTEGER NOT NULL DEFAULT 0");
+        }
+        if ($rcols && !in_array('group_joined_at', $rcols, true)) {
+            $this->db->exec("ALTER TABLE referrals ADD COLUMN group_joined_at DATETIME");
+        }
         // users.referral_code (added if the users table pre-dates this feature).
         $cols = [];
         $res = $this->db->query("PRAGMA table_info(users)");
@@ -236,14 +250,46 @@ class HL_Referral {
         }
     }
 
+    // Is the "must join the group" rule active AND a group actually configured?
+    public function requiresGroupJoin() {
+        if ((string) $this->setting('referral_require_group_join', self::DEFAULTS['referral_require_group_join']) !== '1') return false;
+        return trim((string) $this->setting('sched_group_chat_id', '')) !== '';
+    }
+
     // Promote settled referrals registered -> qualified. Safe to call often.
+    // When the group-join rule is on, a referral must also be marked group_joined.
     public function refreshQualifications() {
         $now = gmdate('Y-m-d H:i:s');
+        $joinGate = $this->requiresGroupJoin() ? " AND group_joined=1" : "";
         $stmt = $this->db->prepare("UPDATE referrals SET status='qualified', qualified_at=:now
-            WHERE status='registered' AND flagged=0 AND qualifies_at IS NOT NULL AND qualifies_at <= :now");
+            WHERE status='registered' AND flagged=0 AND qualifies_at IS NOT NULL AND qualifies_at <= :now" . $joinGate);
         $stmt->bindValue(':now', $now, SQLITE3_TEXT);
         $stmt->execute();
         return $this->db->changes();
+    }
+
+    // The referral row where this user is the invited person (or null).
+    public function referralByReferred($referredId) {
+        $stmt = $this->db->prepare("SELECT * FROM referrals WHERE referred_id = :r");
+        $stmt->bindValue(':r', $referredId, SQLITE3_INTEGER);
+        return $stmt->execute()->fetchArray(SQLITE3_ASSOC) ?: null;
+    }
+
+    // Record that an invited user has joined the group. Idempotent. Returns the
+    // (updated) referral row when this call newly set the flag, else null - so
+    // the caller only notifies the inviter once.
+    public function markGroupJoined($referredId) {
+        $row = $this->referralByReferred($referredId);
+        if (!$row) return null;
+        if ((int) $row['group_joined'] === 1) return null;
+        $now = gmdate('Y-m-d H:i:s');
+        $stmt = $this->db->prepare("UPDATE referrals SET group_joined=1, group_joined_at=:now WHERE id=:id");
+        $stmt->bindValue(':now', $now, SQLITE3_TEXT);
+        $stmt->bindValue(':id', $row['id'], SQLITE3_INTEGER);
+        $stmt->execute();
+        $this->audit('user:' . $referredId, 'group_joined', $row['referrer_id'], $row['id'], 'referred=' . $referredId);
+        $row['group_joined'] = 1; $row['group_joined_at'] = $now;
+        return $row;
     }
 
     // ---------------------------------------------------------------------
@@ -273,6 +319,14 @@ class HL_Referral {
         $stmt->bindValue(':id', $id, SQLITE3_INTEGER);
         return $stmt->execute()->fetchArray(SQLITE3_ASSOC) ?: null;
     }
+    // Referrals still waiting on the group-join step before they can count.
+    public function countAwaitingGroupJoin($telegramId) {
+        if (!$this->requiresGroupJoin()) return 0;
+        $stmt = $this->db->prepare("SELECT COUNT(*) c FROM referrals
+            WHERE referrer_id = :id AND status = 'registered' AND flagged = 0 AND group_joined = 0");
+        $stmt->bindValue(':id', $telegramId, SQLITE3_INTEGER);
+        return (int) ($stmt->execute()->fetchArray(SQLITE3_ASSOC)['c'] ?? 0);
+    }
     // Full progress snapshot for the bot's "My Progress" screen.
     public function progress($telegramId) {
         $this->refreshQualifications();
@@ -285,12 +339,13 @@ class HL_Referral {
         }
         $needed = $next ? max(0, (int) $next['invites_required'] - $qualified) : 0;
         return [
-            'joined'    => $joined,
-            'qualified' => $qualified,
-            'tiers'     => $tiers,
-            'next'      => $next,
-            'needed'    => $needed,
-            'rewards'   => $this->rewardsFor($telegramId),
+            'joined'         => $joined,
+            'qualified'      => $qualified,
+            'awaiting_group' => $this->countAwaitingGroupJoin($telegramId),
+            'tiers'          => $tiers,
+            'next'           => $next,
+            'needed'         => $needed,
+            'rewards'        => $this->rewardsFor($telegramId),
         ];
     }
     // People I referred (for referral history).
@@ -635,6 +690,9 @@ function inviteShowProgress($userId) {
     $msg .= "\n<b>Summary</b>\n";
     $msg .= "\xE2\x80\xA2 Total invites joined: <b>{$p['joined']}</b>\n";
     $msg .= "\xE2\x80\xA2 Successful (qualified) referrals: <b>{$p['qualified']}</b>\n";
+    if (!empty($p['awaiting_group'])) {
+        $msg .= "\xE2\x80\xA2 Waiting to join the group: <b>{$p['awaiting_group']}</b>\n";
+    }
     $msg .= "\xE2\x80\xA2 Rewards earned: <b>{$earned}</b>\n\n";
 
     $msg .= "<b>Reward Milestones</b>\n";
@@ -650,9 +708,18 @@ function inviteShowProgress($userId) {
     $hist = $referral->history($userId, 8);
     if ($hist) {
         $msg .= "\n<b>Referral History</b>\n";
+        $needJoin = $referral->requiresGroupJoin();
         foreach ($hist as $h) {
             $nm = $h['referred_name'] ? htmlspecialchars($h['referred_name']) : 'A friend';
-            $st = $h['flagged'] ? 'under review' : ($h['status'] === 'qualified' ? 'qualified' : 'pending');
+            if ($h['flagged']) {
+                $st = 'under review';
+            } elseif ($h['status'] === 'qualified') {
+                $st = 'qualified';
+            } elseif ($needJoin && (int) ($h['group_joined'] ?? 0) === 0) {
+                $st = 'needs to join the group';
+            } else {
+                $st = 'pending';
+            }
             $msg .= "\xE2\x80\xA2 {$nm} - {$st}\n";
         }
     }

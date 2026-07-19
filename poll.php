@@ -186,6 +186,8 @@ while (time() < $deadline) {
                 handleCallbackQuery($update['callback_query']);
             } elseif (isset($update['message'])) {
                 handleMessage($update['message']);
+            } elseif (isset($update['chat_member'])) {
+                handleChatMember($update['chat_member']);
             }
         } catch (Throwable $e) {
             error_log('poll.php handler error on update ' . ($update['update_id'] ?? '?') . ': ' . $e->getMessage());

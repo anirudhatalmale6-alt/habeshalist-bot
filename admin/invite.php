@@ -40,9 +40,11 @@ if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') {
         case 'save_settings':
             $days = max(0, (int) ($_POST['qualify_days'] ?? 7));
             $usa = ($_POST['usa_only'] ?? '0') === '1';
+            $reqJoin = ($_POST['require_group_join'] ?? '0') === '1';
             $ref->setSetting('referral_qualify_days', (string) $days);
             $ref->setSetting('referral_usa_only', $usa ? '1' : '0');
-            $ref->audit('admin:' . $adminId, 'config_changed', null, null, "qualify_days=$days usa_only=" . ($usa ? 1 : 0));
+            $ref->setSetting('referral_require_group_join', $reqJoin ? '1' : '0');
+            $ref->audit('admin:' . $adminId, 'config_changed', null, null, "qualify_days=$days usa_only=" . ($usa ? 1 : 0) . " require_group_join=" . ($reqJoin ? 1 : 0));
             $flash = 'Settings saved.';
             break;
         case 'tier_add':
@@ -102,6 +104,7 @@ $pending   = $ref->listRewards('earned');
 $allReward = $ref->listRewards(null, 60);
 $referrals = $ref->listReferrals(120);
 $audit     = $ref->listAudit(40);
+$needJoin  = $ref->requiresGroupJoin();
 
 function inv_status_pill($status) {
     switch ($status) {
@@ -164,6 +167,14 @@ if ($flash) hl_flash($flash, $flashType);
       <label>Settle window (days before a referral counts)</label>
       <input type="number" name="qualify_days" min="0" max="90" value="<?= (int) $ref->qualifyDays() ?>">
       <div class="mini">A referral counts toward rewards only after the invited friend has been registered this many days. Set 0 to count immediately (handy for testing).</div>
+    </div>
+    <div class="f">
+      <label>Require joining the group</label>
+      <select name="require_group_join">
+        <option value="1" <?= (string) $ref->setting('referral_require_group_join','1')==='1'?'selected':'' ?>>On - referral counts only after the friend joins the group</option>
+        <option value="0" <?= (string) $ref->setting('referral_require_group_join','1')==='0'?'selected':'' ?>>Off - counts on registration alone</option>
+      </select>
+      <div class="mini">When on, an invited friend must join your Telegram group before the invite counts. Set the group and its invite link on the Schedule Settings page. The bot must be an admin in the group so it can confirm the join.</div>
     </div>
     <div class="f">
       <label>USA-only notice</label>
@@ -278,7 +289,12 @@ if ($flash) hl_flash($flash, $flashType);
         <td><b><?= h($r['referred_name'] ?: ('#' . $r['referred_id'])) ?></b><span class="mini">ID <?= (int) $r['referred_id'] ?></span></td>
         <td><?= h($r['referrer_name'] ?: ('#' . $r['referrer_id'])) ?><span class="mini">ID <?= (int) $r['referrer_id'] ?></span></td>
         <td><span class="pill <?= $pc ?>"><?= h($pl) ?></span>
-            <?= $r['flagged'] ? '<span class="pill rej" title="' . h((string) $r['flag_reason']) . '">Flagged</span>' : '' ?></td>
+            <?= $r['flagged'] ? '<span class="pill rej" title="' . h((string) $r['flag_reason']) . '">Flagged</span>' : '' ?>
+            <?php if ($needJoin): ?>
+              <?= (int) ($r['group_joined'] ?? 0) === 1
+                    ? '<span class="pill ok" title="Confirmed member of the group">In group</span>'
+                    : '<span class="pill mut" title="Has not joined the group yet">Not in group</span>' ?>
+            <?php endif; ?></td>
         <td class="mini"><?= h($r['created_at']) ?></td>
         <td>
           <?php if ($r['status'] !== 'qualified'): ?>

@@ -67,6 +67,8 @@ if ($isHttpRequest) {
             handleCallbackQuery($update['callback_query']);
         } elseif (isset($update['message'])) {
             handleMessage($update['message']);
+        } elseif (isset($update['chat_member'])) {
+            handleChatMember($update['chat_member']);
         }
     }
     exit;
@@ -151,6 +153,7 @@ function handleCallbackQuery($query) {
     // ---- Invite & Earn ----
     if ($data === 'invite')       { handleAction($userId, 'invite'); return; }
     if ($data === 'inv_link')     { inviteShowLink($userId); return; }
+    if ($data === 'inv_verify_join') { inviteVerifyGroupJoin($userId); return; }
     if ($data === 'inv_progress') { inviteShowProgress($userId); return; }
     if ($data === 'inv_rewards')  { inviteShowRewards($userId); return; }
     if ($data === 'inv_myrewards'){ inviteViewMyRewards($userId); return; }
@@ -979,16 +982,151 @@ function referralAttributeNewUser($userId, $refCode, $stateData) {
             $stateData['name'] ?? '', $stateData['phone'] ?? '', $stateData['email'] ?? ''
         );
         if (!$ok || !$referrerId) return;
-        // Tell the inviter (best-effort - they've DM'd the bot before, so allowed).
+
         $friend = $stateData['name'] ?? 'A friend';
-        $note = ($why === 'flagged')
-            ? "\xF0\x9F\x91\x80 A new sign-up used your invite link but needs a quick review before it counts."
-            : "\xF0\x9F\x8E\x89 <b>{$friend}</b> just joined HabeshaList using your invite link! It'll count toward your rewards once they settle in.";
+        $needJoin = ($why !== 'flagged') && $referral->requiresGroupJoin();
+
+        // If the friend is already in the group, count the join right away so we
+        // don't nag them to "join" something they're already in.
+        if ($needJoin && userInGroup($userId)) {
+            $referral->markGroupJoined($userId);
+            $needJoin = false;
+        }
+
+        // Tell the inviter (best-effort - they've DM'd the bot before, so allowed).
+        if ($why === 'flagged') {
+            $note = "\xF0\x9F\x91\x80 A new sign-up used your invite link but needs a quick review before it counts.";
+        } elseif ($needJoin) {
+            $note = "\xF0\x9F\x8E\x89 <b>{$friend}</b> just signed up with your invite link! It'll count toward your rewards once they join the group and settle in.";
+        } else {
+            $note = "\xF0\x9F\x8E\x89 <b>{$friend}</b> just joined using your invite link! It'll count toward your rewards once they settle in.";
+        }
         $tg->sendInlineButtons($referrerId, $note,
             [[['text' => "\xF0\x9F\x93\x88 My Progress", 'callback_data' => 'inv_progress']]]);
+
+        // Ask the new user to join the group to complete the invite.
+        if ($needJoin) { inviteGroupJoinPrompt($userId); }
+
         // Did that push them over a milestone (e.g. when the settle window is 0)?
         foreach ($referral->checkMilestones($referrerId) as $rw) { inviteRewardUnlocked($referrerId, $rw); }
     } catch (\Throwable $e) { /* never block registration on referral errors */ }
+}
+
+// True when a user is currently a member of the configured Telegram group.
+// Best-effort: needs the bot to be in (ideally admin of) that group.
+function userInGroup($userId) {
+    global $tg, $db;
+    $chat = trim((string) $db->getSetting('sched_group_chat_id', ''));
+    if ($chat === '') return false;
+    try {
+        $res = $tg->callApi('getChatMember', ['chat_id' => $chat, 'user_id' => $userId]);
+        if (empty($res['ok'])) return false;
+        $st = $res['result']['status'] ?? '';
+        if (in_array($st, ['creator', 'administrator', 'member'], true)) return true;
+        if ($st === 'restricted') return !empty($res['result']['is_member']);
+        return false; // left | kicked
+    } catch (\Throwable $e) {
+        return false;
+    }
+}
+
+// DM an invited user asking them to join the group to complete their friend's invite.
+function inviteGroupJoinPrompt($userId) {
+    global $tg, $db;
+    $gname = trim((string) $db->getSetting('group_name', 'HabeshaList'));
+    if ($gname === '') $gname = 'HabeshaList';
+    $gnameH = htmlspecialchars($gname);
+    $link = trim((string) $db->getSetting('group_invite_link', ''));
+    $rows = [];
+    if ($link !== '' && preg_match('#^https?://#i', $link)) {
+        $rows[] = [['text' => "\xF0\x9F\x91\xA5 Join {$gname}", 'url' => $link]];
+    }
+    $rows[] = [['text' => "\xE2\x9C\x85 I've Joined", 'callback_data' => 'inv_verify_join']];
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x8E\x89 You're registered! One last step to complete your friend's invite:\n\n" .
+        "Join our <b>{$gnameH}</b> Telegram group, then tap \"I've Joined\" so we can confirm it.",
+        $rows);
+}
+
+// Handle the invited user tapping "I've Joined".
+function inviteVerifyGroupJoin($userId) {
+    global $tg, $db, $referral;
+    if (!$referral) return;
+    $ref = $referral->referralByReferred($userId);
+    if (!$ref) {
+        $tg->sendMessage($userId, "You don't have a pending invite to confirm - but thanks for joining us! \xF0\x9F\x99\x8F");
+        return;
+    }
+    if ((int) $ref['group_joined'] === 1) {
+        $tg->sendMessage($userId, "\xE2\x9C\x85 You're all set - your friend's invite is already confirmed.");
+        return;
+    }
+    if (!userInGroup($userId)) {
+        $gname = trim((string) $db->getSetting('group_name', 'HabeshaList'));
+        if ($gname === '') $gname = 'HabeshaList';
+        $link = trim((string) $db->getSetting('group_invite_link', ''));
+        $rows = [];
+        if ($link !== '' && preg_match('#^https?://#i', $link)) {
+            $rows[] = [['text' => "\xF0\x9F\x91\xA5 Join {$gname}", 'url' => $link]];
+        }
+        $rows[] = [['text' => "\xE2\x9C\x85 I've Joined", 'callback_data' => 'inv_verify_join']];
+        $tg->sendInlineButtons($userId,
+            "I can't see you in the group yet. Tap \"Join " . htmlspecialchars($gname) . "\", then press \"I've Joined\" again.",
+            $rows);
+        return;
+    }
+    $row = $referral->markGroupJoined($userId);
+    $gname = trim((string) $db->getSetting('group_name', 'HabeshaList'));
+    if ($gname === '') $gname = 'HabeshaList';
+    $tg->sendMessage($userId, "\xE2\x9C\x85 Confirmed! You've joined " . htmlspecialchars($gname) . " and your friend's invite now counts. Welcome aboard! \xF0\x9F\x8E\x89");
+    if ($row) { referralNotifyInviterJoined($row); }
+}
+
+// Tell the inviter their friend has joined the group (invite now confirmed).
+function referralNotifyInviterJoined($row) {
+    global $tg, $referral;
+    if (!$referral || !$row) return;
+    $inviter = (int) $row['referrer_id'];
+    $friend = !empty($row['referred_name']) ? htmlspecialchars($row['referred_name']) : 'Your friend';
+    try {
+        $tg->sendInlineButtons($inviter,
+            "\xE2\x9C\x85 <b>{$friend}</b> joined the group - your invite is now confirmed and counts toward your rewards!",
+            [[['text' => "\xF0\x9F\x93\x88 My Progress", 'callback_data' => 'inv_progress']]]);
+        foreach ($referral->checkMilestones($inviter) as $rw) { inviteRewardUnlocked($inviter, $rw); }
+    } catch (\Throwable $e) { /* best-effort */ }
+}
+
+// Passive detection: fires when someone's membership in the group changes.
+// Requires the bot to be an ADMIN of the group and 'chat_member' in allowed_updates.
+function handleChatMember($cm) {
+    global $tg, $db, $referral;
+    if (!$referral) return;
+    try {
+        $want = trim((string) $db->getSetting('sched_group_chat_id', ''));
+        if ($want === '') return;
+        $chatId   = (string) ($cm['chat']['id'] ?? '');
+        $chatUser = isset($cm['chat']['username']) ? '@' . $cm['chat']['username'] : '';
+        $matches = ($want === $chatId) || ($chatUser !== '' && strcasecmp($want, $chatUser) === 0);
+        if (!$matches) return;
+
+        $st = $cm['new_chat_member']['status'] ?? '';
+        $isMember = in_array($st, ['member', 'administrator', 'creator'], true)
+                 || ($st === 'restricted' && !empty($cm['new_chat_member']['is_member']));
+        if (!$isMember) return;
+
+        $uid = $cm['new_chat_member']['user']['id'] ?? null;
+        if (!$uid) return;
+
+        $row = $referral->markGroupJoined($uid);
+        if (!$row) return; // not a referred user, or already counted
+
+        $gname = trim((string) $db->getSetting('group_name', 'HabeshaList'));
+        if ($gname === '') $gname = 'HabeshaList';
+        try {
+            $tg->sendMessage($uid, "\xE2\x9C\x85 Thanks for joining " . htmlspecialchars($gname) . "! Your friend's invite is now confirmed. \xF0\x9F\x8E\x89");
+        } catch (\Throwable $e) { /* user may block DMs; ignore */ }
+        referralNotifyInviterJoined($row);
+    } catch (\Throwable $e) { /* never let a membership update crash the loop */ }
 }
 
 function handleAction($userId, $action) {
