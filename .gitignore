@@ -1,4 +1,7 @@
 data/*
 !data/.htaccess
 *.sqlite
+*.db
+*.log
 .env
+bridge-config.php

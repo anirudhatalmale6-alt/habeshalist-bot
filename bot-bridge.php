@@ -13,14 +13,29 @@
 
 header('Content-Type: application/json');
 
-// Your secret key — must match the one in the bot's config.php
-$API_SECRET = '717e34f13a2589d049d43149649e2668318e4949712b6f2f7e9cd94e28ad8f07';
+// The shared secret (must match the bot's API_SECRET) is NEVER hardcoded here.
+// It is read from the server environment, or from a local, git-ignored
+// "bridge-config.php" next to this file. See bridge-config.example.php.
+$API_SECRET = getenv('HL_API_SECRET') ?: (getenv('API_SECRET') ?: '');
+if ($API_SECRET === '' && is_readable(__DIR__ . '/bridge-config.php')) {
+    $__cfg = require __DIR__ . '/bridge-config.php';
+    if (is_array($__cfg)) {
+        $API_SECRET = (string) ($__cfg['api_secret'] ?? '');
+    }
+}
+if ($API_SECRET === '') {
+    // Fail loudly instead of running with no authentication.
+    http_response_code(500);
+    error_log('bot-bridge: API secret not configured (set HL_API_SECRET or bridge-config.php)');
+    echo json_encode(['success' => false, 'error' => 'Bridge not configured']);
+    exit;
+}
 
 // Read incoming request
 $input = file_get_contents('php://input');
 $data = json_decode($input, true);
 
-if (!$data || !isset($data['secret']) || $data['secret'] !== $API_SECRET) {
+if (!$data || !isset($data['secret']) || !hash_equals($API_SECRET, (string) $data['secret'])) {
     http_response_code(403);
     echo json_encode(['success' => false, 'error' => 'Unauthorized']);
     exit;
@@ -39,6 +54,27 @@ if ($action === 'create_listing') {
 } else {
     echo json_encode(['success' => false, 'error' => 'Unknown action']);
 }
+
+// Escape a user-supplied string for inline SQL using the DB driver's own
+// escaper (charset-aware) when reachable, falling back to addslashes. Used for
+// the few OSClass inserts that go through the raw DAO ->query() path.
+function bridge_esc($dao, $s) {
+    $s = (string) $s;
+    try {
+        if (isset($dao->conn) && is_object($dao->conn) && method_exists($dao->conn, 'getOsclassDb')) {
+            $link = $dao->conn->getOsclassDb();
+            if ($link instanceof mysqli) {
+                return $link->real_escape_string($s);
+            }
+        }
+    } catch (\Throwable $e) { /* fall through */ }
+    return addslashes($s);
+}
+
+// Allowed upload extensions for ad media downloaded from Telegram.
+const BRIDGE_IMAGE_EXT = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+const BRIDGE_VIDEO_EXT = ['mp4', 'mov', 'webm'];
+const BRIDGE_MAX_UPLOAD_BYTES = 25165824; // 24 MB cap per file
 
 function moderateItem($data) {
     $osclassPath = __DIR__ . '/oc-load.php';
@@ -84,7 +120,9 @@ function moderateItem($data) {
         }
 
     } catch (Exception $e) {
-        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        // Never leak DB/OSClass internals to the caller; log the detail instead.
+        error_log('bot-bridge error: ' . $e->getMessage());
+        echo json_encode(['success' => false, 'error' => 'Server error']);
     }
 }
 
@@ -149,14 +187,16 @@ function registerUser($data) {
         if ($phone !== '' && $userId) {
             $prefix = DB_TABLE_PREFIX;
             $dao = User::newInstance()->dao;
-            $escPhone = addslashes($phone);
+            $escPhone = bridge_esc($dao, $phone);
             @$dao->query("UPDATE {$prefix}t_user SET s_phone_mobile = '{$escPhone}' WHERE pk_i_id = {$userId}");
         }
 
         echo json_encode(['success' => true, 'osclass_user_id' => (int)$userId]);
 
     } catch (Exception $e) {
-        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        // Never leak DB/OSClass internals to the caller; log the detail instead.
+        error_log('bot-bridge error: ' . $e->getMessage());
+        echo json_encode(['success' => false, 'error' => 'Server error']);
     }
 }
 
@@ -225,8 +265,8 @@ function createListing($data) {
 
         $prefix = DB_TABLE_PREFIX;
         $dao = Item::newInstance()->dao;
-        $escTitle = addslashes($title);
-        $escDesc = addslashes($description);
+        $escTitle = bridge_esc($dao, $title);
+        $escDesc = bridge_esc($dao, $description);
 
         $dao->query(
             "INSERT INTO {$prefix}t_item_description (fk_i_item_id, fk_c_locale_code, s_title, s_description) " .
@@ -240,11 +280,11 @@ function createListing($data) {
         $locAddress = $data['address'] ?? '';
 
         if ($locCountry || $locState || $locCity || $locAddress) {
-            $escCountry = addslashes($locCountry);
-            $escCountryCode = addslashes($locCountryCode ?: '');
-            $escState = addslashes($locState);
-            $escCity = addslashes($locCity);
-            $escAddress = addslashes($locAddress);
+            $escCountry = bridge_esc($dao, $locCountry);
+            $escCountryCode = bridge_esc($dao, $locCountryCode ?: '');
+            $escState = bridge_esc($dao, $locState);
+            $escCity = bridge_esc($dao, $locCity);
+            $escAddress = bridge_esc($dao, $locAddress);
             $dao->query(
                 "INSERT INTO {$prefix}t_item_location (fk_i_item_id, fk_c_country_code, s_country, s_region, s_city, s_address) " .
                 "VALUES ({$itemId}, '{$escCountryCode}', '{$escCountry}', '{$escState}', '{$escCity}', '{$escAddress}')"
@@ -273,13 +313,36 @@ function createListing($data) {
             $bin = @file_get_contents("https://api.telegram.org/file/bot{$botToken}/{$filePath}");
             if ($bin === false || $bin === '') return false;
 
+            // Size cap: never write an oversized file to disk.
+            if (strlen($bin) > BRIDGE_MAX_UPLOAD_BYTES) {
+                error_log('bot-bridge: rejected oversized upload (' . strlen($bin) . ' bytes)');
+                return false;
+            }
+
             $ext = strtolower(pathinfo($filePath, PATHINFO_EXTENSION));
             if ($isVideo) {
                 if ($ext === '') $ext = 'mp4';
-                $contentType = ($ext === 'mov') ? 'video/quicktime' : 'video/mp4';
+                // Extension allowlist: reject anything that isn't a known video type.
+                if (!in_array($ext, BRIDGE_VIDEO_EXT, true)) {
+                    error_log('bot-bridge: rejected video upload with extension "' . $ext . '"');
+                    return false;
+                }
+                $contentType = ($ext === 'mov') ? 'video/quicktime' : (($ext === 'webm') ? 'video/webm' : 'video/mp4');
             } else {
                 if ($ext === '') $ext = 'jpg';
-                $contentType = ($ext === 'png') ? 'image/png' : (($ext === 'webp') ? 'image/webp' : 'image/jpeg');
+                // Extension allowlist: reject anything that isn't a known image type.
+                if (!in_array($ext, BRIDGE_IMAGE_EXT, true)) {
+                    error_log('bot-bridge: rejected image upload with extension "' . $ext . '"');
+                    return false;
+                }
+                $contentType = ($ext === 'png') ? 'image/png' : (($ext === 'webp') ? 'image/webp' : (($ext === 'gif') ? 'image/gif' : 'image/jpeg'));
+            }
+
+            // Belt-and-braces: make sure nothing in the uploads dir can execute
+            // as a script even if a bad file ever lands there.
+            $htPath = $uploadDir . '.htaccess';
+            if (!file_exists($htPath)) {
+                @file_put_contents($htPath, "php_flag engine off\nRemoveHandler .php .phtml .php3 .php4 .php5 .php7 .phps\nAddType text/plain .php .phtml .phps\n");
             }
 
             $dao->query(
@@ -317,7 +380,9 @@ function createListing($data) {
         ]);
 
     } catch (Exception $e) {
-        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+        // Never leak DB/OSClass internals to the caller; log the detail instead.
+        error_log('bot-bridge error: ' . $e->getMessage());
+        echo json_encode(['success' => false, 'error' => 'Server error']);
     }
 }
 

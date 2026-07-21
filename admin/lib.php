@@ -120,7 +120,12 @@ function hl_count($sql) {
 function hl_session_start() {
     if (session_status() === PHP_SESSION_ACTIVE) return;
     session_name('HLADMIN');
-    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    // Mark the cookie Secure whenever the request is really HTTPS, using the same
+    // 3-way detection as the http->https redirect so it stays set even behind a
+    // TLS-terminating proxy where PHP sees plain http.
+    $secure = (!empty($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) !== 'off')
+        || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https')
+        || ((int) ($_SERVER['SERVER_PORT'] ?? 0) === 443);
     session_set_cookie_params([
         'lifetime' => 0,
         'path'     => '/',
