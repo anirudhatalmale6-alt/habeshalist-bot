@@ -165,9 +165,17 @@ function registerUser($data) {
         }
         $secret = md5(uniqid(rand(), true));
 
+        // Some OSClass installs mark t_user.s_username as NOT NULL. Building a
+        // unique username up front means the insert never fails on a missing/
+        // duplicate username, which was leaving bot users out of the site admin.
+        $base = preg_replace('/[^a-z0-9_]/', '', strtolower(explode('@', $email)[0]));
+        if ($base === '') $base = 'hluser';
+        $username = $base . rand(1000, 9999999);
+
         $user = User::newInstance();
         $ok = $user->insert([
             's_name'      => $name !== '' ? $name : 'HabeshaList User',
+            's_username'  => $username,
             's_email'     => $email,
             's_password'  => $hash,
             's_secret'    => $secret,
@@ -240,6 +248,10 @@ function createListing($data) {
             'fk_i_user_id' => $osUserId,
             'dt_pub_date' => date('Y-m-d H:i:s'),
             'dt_mod_date' => date('Y-m-d H:i:s'),
+            // Far-future expiry so OSClass never treats the ad as expired and hides
+            // it from listings/search. Without this the column can default to a past
+            // date and the ad silently disappears even when enabled+active.
+            'dt_expiration' => '9999-12-31 23:59:59',
             'f_price' => $price,
             'fk_c_currency_code' => 'USD',
             's_contact_name' => $contactName,

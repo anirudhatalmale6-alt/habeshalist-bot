@@ -494,6 +494,15 @@ function handleMessage($msg) {
     $text = trim($msg['text'] ?? '');
     $isPrivate = ($msg['chat']['type'] === 'private');
 
+    // Keep the private chat clean. When a user taps a group menu button, Telegram
+    // opens this chat and auto-sends the raw "/start post_ad" command as a visible
+    // message. We delete any bot command the user sends here so they only ever see
+    // the bot's own replies, not the command text. Best-effort (ignored if the
+    // message is too old or already gone).
+    if ($isPrivate && isset($msg['message_id']) && $text !== '' && $text[0] === '/') {
+        $tg->deleteMessage($chatId, $msg['message_id']);
+    }
+
     // /start with deep link in private chat
     if ($isPrivate && strpos($text, '/start') === 0) {
         $parts = explode(' ', $text);
@@ -1687,7 +1696,7 @@ function handlePublish($userId, $state) {
     $adData['osclass_user_id'] = $user['osclass_user_id'] ?? null;
 
     // Prevent the "unresponsive" feeling during the OSClass call
-    $tg->sendMessage($userId, "\xE2\x8F\xB3 Submitting your ad, please wait...");
+    $tg->sendMessage($userId, "\xE2\x8F\xB3 Publishing your ad, please wait...");
 
     $adId = $db->createAd($userId, $adData);
 
@@ -1696,27 +1705,45 @@ function handlePublish($userId, $state) {
     $title = $adData['title'] ?? 'Untitled';
 
     $osclassId = null;
+    $published = false;
     if ($result && isset($result['success']) && $result['success']) {
         $osclassId = $result['osclass_id'] ?? null;
+        $published = true;
     }
-    // Ad is created hidden and stays 'pending' until an admin approves it
-    $db->updateAdStatus($adId, 'pending', $osclassId);
-
-    $tg->sendInlineButtons($userId,
-        "\xE2\x9C\x85 <b>Your ad has been submitted for review!</b>\n\n" .
-        "\xF0\x9F\x93\x9D Title: <b>{$title}</b>\n\n" .
-        "Our team will review it shortly. As soon as it's approved, you'll get a message here and it will go live on HabeshaList.com.\n\n" .
-        "What would you like to do next?",
-        [
-            [['text' => "\xE2\x9E\x95 Post Another Ad", 'callback_data' => 'post_another']],
-            [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
-        ]
-    );
 
     $db->setState($userId, 'idle', []);
 
-    // Send the ad to the admin(s) for approval
-    notifyAdminsForReview($adId, $adData, $user);
+    if ($published) {
+        // Ads go live on the website immediately - no admin review step.
+        $db->updateAdStatus($adId, 'approved', $osclassId);
+
+        $btns = [];
+        if ($osclassId) {
+            $btns[] = [['text' => "\xF0\x9F\x94\x97 View My Ad", 'url' => $config['website_url'] . '/index.php?page=item&id=' . $osclassId]];
+        }
+        $btns[] = [['text' => "\xE2\x9E\x95 Post Another Ad", 'callback_data' => 'post_another']];
+        $btns[] = [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']];
+
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x8E\x89 <b>Your ad is now live on HabeshaList.com!</b>\n\n" .
+            "\xF0\x9F\x93\x9D Title: <b>{$title}</b>\n\n" .
+            "It's published and visible on the website right away. What would you like to do next?",
+            $btns
+        );
+    } else {
+        // Website didn't accept it (temporary bridge/site issue) - be honest and
+        // let the user retry rather than claiming it's live.
+        $db->updateAdStatus($adId, 'failed', $osclassId);
+
+        $tg->sendInlineButtons($userId,
+            "\xE2\x9A\xA0\xEF\xB8\x8F We couldn't publish your ad right now because of a temporary issue on our end. " .
+            "Please try again in a moment - your details weren't lost.",
+            [
+                [['text' => "\xF0\x9F\x94\x84 Try Again", 'callback_data' => 'post_another']],
+                [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
+            ]
+        );
+    }
 }
 
 function notifyAdminsForReview($adId, $adData, $user) {
@@ -1819,6 +1846,7 @@ function publishToOSClass($adData, $userId) {
     $payload = [
         'secret' => $config['api_secret'],
         'action' => 'create_listing',
+        'bot_token' => $config['bot_token'] ?? '',
         'telegram_id' => $userId,
         'category' => $adData['category'] ?? '',
         'subcategory' => $adData['subcategory'] ?? '',
@@ -1834,6 +1862,7 @@ function publishToOSClass($adData, $userId) {
         'contact_email' => $adData['contact_email'] ?? '',
         'osclass_user_id' => $adData['osclass_user_id'] ?? null,
         'photos' => $adData['photos'] ?? [],
+        'auto_approve' => true,   // classifieds ads go live immediately (no admin review)
     ];
 
     return callBridge($payload, 30);

@@ -33,14 +33,10 @@ panel, (G) = check the Telegram group, (W) = check the website.
 - [ ] (U) Enter description and phone.
 - [ ] (U) Send up to 5 photos; a 6th shows "Maximum of 5 photos reached".
 - [ ] (U) Cancel asks for confirmation before discarding.
-- [ ] (U) On publish you see "Publishing your ad, please wait..." and the button
-      deactivates (can't double-submit).
-- [ ] (A) The ad arrives for review with its photos + Approve / Reject buttons;
-      it is NOT live on the site yet.
-- [ ] (A) Approve — the ad goes live on the website and the poster gets a "now
-      live" message with a View link.
-- [ ] (A) Reject — the ad stays hidden and the poster is notified.
-- [ ] (W) An approved ad is visible on the website with its photos.
+- [ ] (U) On publish you see "Publishing your ad, please wait..." then a "Your ad
+      is now live on HabeshaList.com!" message with a View link — no admin review
+      step; it publishes directly.
+- [ ] (W) The ad is visible on the website immediately, with its photos.
 
 ## 4. Promote My Business — packages
 - [ ] (U) "Promote My Business" shows the package picker: One-Time, Monthly,
