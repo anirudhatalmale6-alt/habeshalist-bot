@@ -13,6 +13,23 @@
 
 header('Content-Type: application/json');
 
+// Turn any fatal/parse error (a mistyped bridge-config.php, an OSClass bootstrap
+// fatal, a missing class, etc.) into a JSON reason instead of a blank HTTP 500.
+// Registered first so it covers everything below, including the config require.
+register_shutdown_function(function () {
+    $e = error_get_last();
+    if ($e && in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR], true)) {
+        if (!headers_sent()) {
+            http_response_code(500);
+            header('Content-Type: application/json');
+        }
+        echo json_encode([
+            'success' => false,
+            'error'   => 'Bridge fatal: ' . $e['message'] . ' (' . basename($e['file']) . ':' . $e['line'] . ')',
+        ]);
+    }
+});
+
 // The shared secret (must match the bot's API_SECRET) is NEVER hardcoded here.
 // It is read from the server environment, or from a local, git-ignored
 // "bridge-config.php" next to this file. See bridge-config.example.php.
@@ -119,10 +136,12 @@ function moderateItem($data) {
             echo json_encode(['success' => false, 'error' => 'Unknown decision']);
         }
 
-    } catch (Exception $e) {
-        // Never leak DB/OSClass internals to the caller; log the detail instead.
+    } catch (\Throwable $e) {
+        // This point is only reachable AFTER the shared-secret check, so the caller
+        // is the trusted bot - returning the real reason makes failures diagnosable
+        // (the bot only shows it to the site admin, never to normal users).
         error_log('bot-bridge error: ' . $e->getMessage());
-        echo json_encode(['success' => false, 'error' => 'Server error']);
+        echo json_encode(['success' => false, 'error' => 'Server error: ' . $e->getMessage()]);
     }
 }
 
@@ -201,10 +220,12 @@ function registerUser($data) {
 
         echo json_encode(['success' => true, 'osclass_user_id' => (int)$userId]);
 
-    } catch (Exception $e) {
-        // Never leak DB/OSClass internals to the caller; log the detail instead.
+    } catch (\Throwable $e) {
+        // This point is only reachable AFTER the shared-secret check, so the caller
+        // is the trusted bot - returning the real reason makes failures diagnosable
+        // (the bot only shows it to the site admin, never to normal users).
         error_log('bot-bridge error: ' . $e->getMessage());
-        echo json_encode(['success' => false, 'error' => 'Server error']);
+        echo json_encode(['success' => false, 'error' => 'Server error: ' . $e->getMessage()]);
     }
 }
 
@@ -391,10 +412,12 @@ function createListing($data) {
             'osclass_id' => $itemId,
         ]);
 
-    } catch (Exception $e) {
-        // Never leak DB/OSClass internals to the caller; log the detail instead.
+    } catch (\Throwable $e) {
+        // This point is only reachable AFTER the shared-secret check, so the caller
+        // is the trusted bot - returning the real reason makes failures diagnosable
+        // (the bot only shows it to the site admin, never to normal users).
         error_log('bot-bridge error: ' . $e->getMessage());
-        echo json_encode(['success' => false, 'error' => 'Server error']);
+        echo json_encode(['success' => false, 'error' => 'Server error: ' . $e->getMessage()]);
     }
 }
 
