@@ -58,6 +58,14 @@ if (!$data || !isset($data['secret']) || !hash_equals($API_SECRET, (string) $dat
     exit;
 }
 
+// Allowed upload extensions + size cap for ad media downloaded from Telegram.
+// These MUST be defined before the dispatch below: function definitions hoist,
+// but top-level const statements execute in source order, so declaring them
+// here (above the createListing call) guarantees they exist when storeMedia runs.
+const BRIDGE_IMAGE_EXT = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+const BRIDGE_VIDEO_EXT = ['mp4', 'mov', 'webm'];
+const BRIDGE_MAX_UPLOAD_BYTES = 25165824; // 24 MB cap per file
+
 $action = $data['action'] ?? '';
 
 if ($action === 'create_listing') {
@@ -87,11 +95,6 @@ function bridge_esc($dao, $s) {
     } catch (\Throwable $e) { /* fall through */ }
     return addslashes($s);
 }
-
-// Allowed upload extensions for ad media downloaded from Telegram.
-const BRIDGE_IMAGE_EXT = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
-const BRIDGE_VIDEO_EXT = ['mp4', 'mov', 'webm'];
-const BRIDGE_MAX_UPLOAD_BYTES = 25165824; // 24 MB cap per file
 
 function moderateItem($data) {
     $osclassPath = __DIR__ . '/oc-load.php';

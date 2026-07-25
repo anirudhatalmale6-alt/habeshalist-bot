@@ -684,6 +684,12 @@ function handleStateInput($userId, $msg) {
             $reg = registerOnWebsite($stateData['name'], $stateData['phone'], $stateData['email']);
             if ($reg && !empty($reg['osclass_user_id'])) {
                 $db->setOsclassUserId($userId, $reg['osclass_user_id']);
+            } elseif (isAdmin($userId)) {
+                // Website sync is best-effort and normally silent. For the admin,
+                // surface why it failed so a missing Users-panel entry is
+                // diagnosable (regular users never see this).
+                $why = is_array($reg) ? ($reg['error'] ?? 'no reason returned') : 'no response from website bridge';
+                $tg->sendMessage($userId, "\xF0\x9F\x9B\xA0 <i>Admin diagnostics (website sync):</i> " . htmlspecialchars((string) $why, ENT_QUOTES, 'UTF-8'));
             }
 
             // Invite & Earn: if this user arrived via a referral link, attribute
