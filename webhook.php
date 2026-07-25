@@ -1735,9 +1735,18 @@ function handlePublish($userId, $state) {
         // let the user retry rather than claiming it's live.
         $db->updateAdStatus($adId, 'failed', $osclassId);
 
-        $tg->sendInlineButtons($userId,
-            "\xE2\x9A\xA0\xEF\xB8\x8F We couldn't publish your ad right now because of a temporary issue on our end. " .
-            "Please try again in a moment - your details weren't lost.",
+        $failMsg = "\xE2\x9A\xA0\xEF\xB8\x8F We couldn't publish your ad right now because of a temporary issue on our end. " .
+            "Please try again in a moment - your details weren't lost.";
+
+        // Admins (the site owner) get the real reason appended so a publish
+        // failure can be diagnosed without server-log access. Regular users
+        // never see this - just the friendly line above.
+        if (isAdmin($userId)) {
+            $why = is_array($result) ? ($result['error'] ?? 'website returned success=false with no reason') : 'no response from website bridge';
+            $failMsg .= "\n\n\xF0\x9F\x9B\xA0 <i>Admin diagnostics:</i> " . htmlspecialchars((string) $why, ENT_QUOTES, 'UTF-8');
+        }
+
+        $tg->sendInlineButtons($userId, $failMsg,
             [
                 [['text' => "\xF0\x9F\x94\x84 Try Again", 'callback_data' => 'post_another']],
                 [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
@@ -1947,14 +1956,27 @@ function callBridge($payload, $timeout = 30) {
     curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
     $response = curl_exec($ch);
     $error = curl_error($ch);
+    $httpCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
 
     if ($error) {
         error_log("OSClass bridge error: {$error}");
-        return null;
+        return ['success' => false, 'error' => 'Network: ' . $error, '_http' => $httpCode];
     }
 
-    return json_decode($response, true);
+    $decoded = json_decode($response, true);
+    if (!is_array($decoded)) {
+        // A non-JSON body almost always means an HTML error/redirect page from the
+        // host (wrong bridge URL, WAF block, PHP fatal, login wall) rather than the
+        // bridge itself. Keep a short text snippet so the reason is diagnosable
+        // instead of showing a generic "temporary issue".
+        $snippet = trim(preg_replace('/\s+/', ' ', strip_tags((string) $response)));
+        if ($snippet === '') $snippet = 'empty response';
+        if (strlen($snippet) > 240) $snippet = substr($snippet, 0, 240) . '...';
+        error_log("OSClass bridge non-JSON (HTTP {$httpCode}): {$snippet}");
+        return ['success' => false, 'error' => "Bad response (HTTP {$httpCode}): {$snippet}", '_http' => $httpCode];
+    }
+    return $decoded;
 }
 
 // ============================================================

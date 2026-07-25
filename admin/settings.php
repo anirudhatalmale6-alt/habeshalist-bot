@@ -50,6 +50,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $flash = 'Telegram would not generate a link: ' . ($err !== '' ? $err : 'unknown error') . '.' . $hint; $flashType = 'err';
             }
         }
+    } elseif ($form === 'cleanup') {
+        // Wipe test data so the owner can start production from a clean slate.
+        // Each group maps to the tables behind a panel section, so the labels
+        // match what the owner sees: Payments/Businesses = promotions, Dashboard
+        // = scheduled posts, etc. Config (pricing, keys, tiers, schedule) is
+        // never touched here.
+        $groups = [
+            'promotions'  => ['label' => 'Payments & Businesses', 'tables' => ['promotions']],
+            'scheduled'   => ['label' => 'Scheduled / Dashboard posts', 'tables' => ['scheduled_posts']],
+            'ads'         => ['label' => 'Classified ads', 'tables' => ['ads']],
+            'referrals'   => ['label' => 'Invite & Earn data', 'tables' => ['referrals', 'referral_rewards', 'referral_audit']],
+            'users'       => ['label' => 'Users & their in-bot progress', 'tables' => ['users', 'user_states']],
+        ];
+        $picked = array_keys(array_filter($_POST['wipe'] ?? [], fn($v) => $v === '1'));
+        if (!$picked) {
+            $flash = 'Nothing selected - tick at least one item to clear.'; $flashType = 'err';
+        } else {
+            $db = hl_db();
+            $done = [];
+            foreach ($picked as $g) {
+                if (!isset($groups[$g])) continue;
+                $rows = 0;
+                foreach ($groups[$g]['tables'] as $t) {
+                    // Skip cleanly if a table isn't present on this install.
+                    $exists = $db->querySingle("SELECT name FROM sqlite_master WHERE type='table' AND name='" . SQLite3::escapeString($t) . "'");
+                    if (!$exists) continue;
+                    $rows += (int) $db->querySingle("SELECT COUNT(*) FROM {$t}");
+                    $db->exec("DELETE FROM {$t}");
+                }
+                $done[] = $groups[$g]['label'] . " ({$rows})";
+            }
+            $flash = 'Cleared: ' . implode(', ', $done) . '. Config (pricing, payment methods, keys, schedule) was left untouched.';
+        }
     } elseif ($form === 'group') {
         // Community display name + public join link (shown to users in the bot).
         $groupName = trim($_POST['group_name'] ?? '');
@@ -219,6 +252,33 @@ if ($flash) hl_flash($flash, $flashType);
   <h2>How to turn it on</h2>
   <p class="sub">The scheduler runs from a cron job (I will give you the exact one-line command for your server). It books approved promotions into free slots and posts them to the group at each slot time, pinning where the plan includes a pin.</p>
   <p class="muted small mono">*/5 * * * * php /home/USER/.../bot/scheduler.php &gt;&gt; /home/USER/.../bot/data/scheduler.log 2&gt;&amp;1</p>
+</div>
+
+<div class="card">
+  <h2>Clear test data</h2>
+  <p class="sub">Wipe the test records you built up while trying things out, so you launch clean. Tick what to remove and confirm. This only clears data &ndash; your settings (pricing, payment methods, keys, schedule, reward tiers) are never touched.</p>
+  <form method="post" onsubmit="return confirm('Clear the selected data permanently? This cannot be undone.')">
+    <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="cleanup">
+    <?php
+      $wipeOpts = [
+        'promotions' => ['Payments &amp; Businesses', 'Everything under the Payments and Businesses pages (paid/pending promotions and their payment records).'],
+        'scheduled'  => ['Scheduled / Dashboard posts', 'Booked and posted schedule entries &ndash; what shows in Scheduled Posts and each user\'s Dashboard.'],
+        'ads'        => ['Classified ads', 'Ads submitted through "Post to Website" (the bot-side records; ads already on the website are separate).'],
+        'referrals'  => ['Invite &amp; Earn data', 'Referrals, earned rewards and the referral audit log.'],
+        'users'      => ['Users &amp; their in-bot progress', 'Every registered bot user and their current step. Most destructive &ndash; use only for a full reset.'],
+      ];
+      foreach ($wipeOpts as $k => $o):
+    ?>
+      <div class="row"><div class="field">
+        <label style="display:flex;align-items:flex-start;gap:9px;cursor:pointer">
+          <input type="checkbox" name="wipe[<?= $k ?>]" value="1" style="width:auto;margin-top:3px">
+          <span><b><?= $o[0] ?></b><br><span class="muted small"><?= $o[1] ?></span></span>
+        </label>
+      </div></div>
+    <?php endforeach; ?>
+    <button type="submit" class="btn red" style="background:#b91c1c">Clear selected data</button>
+  </form>
 </div>
 
 <?php hl_shell_foot();
