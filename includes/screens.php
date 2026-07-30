@@ -372,3 +372,113 @@ function hl_screen_delete_booking(SQLite3 $db, $bookingId) {
     $st->execute();
     return $media;
 }
+
+// ---------------------------------------------------------------------------
+// Advertiser bookings (Milestone 2)
+//
+// A customer books a screen from inside the Telegram bot: pick screen -> dates
+// -> upload flyer -> pay. That creates a booking with status 'pending' (and a
+// payment_status reflecting how they paid). An admin then approves it, which
+// flips status to 'approved' + payment_status 'paid' - the exact state the
+// player's playlist requires - so it goes live on its start date automatically.
+// Uses the SAME screen_bookings table and playlist path as house ads.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create an advertiser booking. $opts: screen_id, telegram_id, business_name,
+ * media (array of ['path','type','dwell']), start_date, end_date, price,
+ * payment_status ('paid'|'awaiting_verification'|'unpaid'), payment_ref,
+ * status (default 'pending'). Returns the new booking id (0 if no media).
+ */
+function hl_screen_book(SQLite3 $db, array $opts) {
+    $clean = [];
+    foreach (($opts['media'] ?? []) as $m) {
+        if (empty($m['path'])) continue;
+        $clean[] = [
+            'path'  => (string) $m['path'],
+            'type'  => in_array(($m['type'] ?? ''), ['image', 'video'], true) ? $m['type'] : hl_screen_media_type($m['path']),
+            'dwell' => (int) ($m['dwell'] ?? 10) ?: 10,
+        ];
+    }
+    if (!$clean) return 0;
+    $status  = in_array($opts['status'] ?? '', ['pending', 'approved', 'live', 'expired', 'rejected'], true)
+        ? $opts['status'] : 'pending';
+    $payStat = in_array($opts['payment_status'] ?? '', ['unpaid', 'awaiting_verification', 'paid'], true)
+        ? $opts['payment_status'] : 'unpaid';
+    $st = $db->prepare("
+        INSERT INTO screen_bookings
+            (screen_id, telegram_id, business_name, media, start_date, end_date,
+             price, payment_status, payment_ref, status)
+        VALUES
+            (:sid, :tid, :bname, :media, :start, :end,
+             :price, :pstat, :pref, :status)");
+    $st->bindValue(':sid',   (int) ($opts['screen_id'] ?? 0), SQLITE3_INTEGER);
+    $st->bindValue(':tid',   isset($opts['telegram_id']) ? (int) $opts['telegram_id'] : null,
+                             isset($opts['telegram_id']) ? SQLITE3_INTEGER : SQLITE3_NULL);
+    $st->bindValue(':bname', trim($opts['business_name'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':media', json_encode(array_values($clean)), SQLITE3_TEXT);
+    $st->bindValue(':start', (string) ($opts['start_date'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':end',   (string) ($opts['end_date'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':price', (float) ($opts['price'] ?? 0), SQLITE3_FLOAT);
+    $st->bindValue(':pstat', $payStat, SQLITE3_TEXT);
+    $st->bindValue(':pref',  (string) ($opts['payment_ref'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':status', $status, SQLITE3_TEXT);
+    $st->execute();
+    return $db->lastInsertRowID();
+}
+
+/**
+ * Move a booking to a new status (and optionally a new payment_status). Used by
+ * both the Telegram approve/reject buttons and the web admin approval queue.
+ */
+function hl_screen_set_booking_status(SQLite3 $db, $bookingId, $status, $paymentStatus = null) {
+    $status = in_array($status, ['pending', 'approved', 'live', 'expired', 'rejected'], true) ? $status : 'pending';
+    if ($paymentStatus !== null) {
+        $st = $db->prepare("UPDATE screen_bookings SET status = :s, payment_status = :p WHERE id = :id");
+        $st->bindValue(':p', (string) $paymentStatus, SQLITE3_TEXT);
+    } else {
+        $st = $db->prepare("UPDATE screen_bookings SET status = :s WHERE id = :id");
+    }
+    $st->bindValue(':s', $status, SQLITE3_TEXT);
+    $st->bindValue(':id', (int) $bookingId, SQLITE3_INTEGER);
+    $st->execute();
+    return $db->changes() > 0;
+}
+
+/** Bookings awaiting admin approval (status 'pending'), oldest first, with the screen name joined. */
+function hl_screen_pending_bookings(SQLite3 $db) {
+    $rows = [];
+    $res = $db->query("
+        SELECT b.*, s.name AS screen_name, s.location AS screen_location
+        FROM screen_bookings b
+        LEFT JOIN screens s ON s.id = b.screen_id
+        WHERE b.status = 'pending'
+        ORDER BY b.id ASC");
+    while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
+        $r['media_items'] = json_decode((string) $r['media'], true) ?: [];
+        $rows[] = $r;
+    }
+    return $rows;
+}
+
+/** Count of bookings awaiting approval (for an admin badge). */
+function hl_screen_pending_count(SQLite3 $db) {
+    $res = $db->query("SELECT COUNT(*) AS n FROM screen_bookings WHERE status = 'pending'");
+    $row = $res ? $res->fetchArray(SQLITE3_ASSOC) : ['n' => 0];
+    return (int) ($row['n'] ?? 0);
+}
+
+/**
+ * Price for booking a screen for $days days at its effective rate. Day-rate =
+ * rate * days; week-rate = rate * whole-or-part weeks. Returns a float (dollars),
+ * or null if the screen has no price set yet.
+ */
+function hl_screen_price_for(SQLite3 $db, $screenId, $days) {
+    $rate = hl_screen_rate($db, $screenId);
+    if (!$rate) return null;
+    $days = max(1, (int) $days);
+    if (($rate['unit'] ?? 'day') === 'week') {
+        return (float) $rate['rate'] * (int) ceil($days / 7);
+    }
+    return (float) $rate['rate'] * $days;
+}

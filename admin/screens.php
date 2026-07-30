@@ -202,6 +202,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
             $flash = 'Ad removed.';
         }
+
+    } elseif ($form === 'booking_toggle') {
+        $on = isset($_POST['enabled']) ? '1' : '0';
+        hl_set_setting('screens_booking_enabled', $on);
+        $flash = $on === '1'
+            ? 'Customer booking is ON - people can book screens from the bot.'
+            : 'Customer booking is paused - the bot won\'t take new screen bookings.';
+
+    } elseif ($form === 'approve_booking' || $form === 'reject_booking') {
+        // Web mirror of the Telegram approve/reject buttons.
+        $bid = (int) ($_POST['booking_id'] ?? 0);
+        $b = $bid ? hl_screen_booking_by_id($db, $bid) : null;
+        if (!$b) { $flash = 'That booking could not be found.'; $flashType = 'err'; }
+        elseif (($b['status'] ?? '') !== 'pending') {
+            $flash = 'That booking was already handled (status: ' . h($b['status']) . ').'; $flashType = 'err';
+        } else {
+            $bname = $b['business_name'] ?: 'the ad';
+            if ($form === 'approve_booking') {
+                hl_screen_set_booking_status($db, $bid, 'approved', 'paid');
+                $userText = "\xF0\x9F\x8E\x89 <b>Great news!</b> Your screen ad for <b>" . htmlspecialchars($bname, ENT_QUOTES)
+                          . "</b> has been approved. It will show on the screen for your booked dates. Thank you!";
+                $flash = 'Approved: ' . $bname . '.';
+            } else {
+                hl_screen_set_booking_status($db, $bid, 'rejected');
+                $userText = "Regarding your screen ad for <b>" . htmlspecialchars($bname, ENT_QUOTES)
+                          . "</b> - unfortunately it wasn't approved this time. Please contact support if you have questions or would like to resubmit.";
+                $flash = 'Rejected: ' . $bname . '.';
+            }
+            // Best-effort Telegram notice to the customer.
+            $tid = (int) ($b['telegram_id'] ?? 0);
+            if ($tid && function_exists('hl_effective_secret') && function_exists('hl_tg_api')) {
+                $token = hl_effective_secret('TELEGRAM_BOT_TOKEN', 'sec_bot_token');
+                if ($token !== '') {
+                    $r = hl_tg_api($token, 'sendMessage', ['chat_id' => $tid, 'text' => $userText, 'parse_mode' => 'HTML']);
+                    if (empty($r['ok'])) $flash .= ' (saved; Telegram notice failed: ' . h($r['description'] ?? 'unknown') . ')';
+                } else {
+                    $flash .= ' (saved; bot token not available here, so the customer was not messaged)';
+                }
+            }
+        }
     }
 }
 
@@ -211,6 +251,8 @@ $playerBase = hl_get_setting('screen_player_url', '');
 $editId    = (int) ($_GET['edit'] ?? 0);
 $editing   = $editId ? hl_screen_by_id($db, $editId) : null;
 $csrf      = h(hl_csrf_token());
+$pendingBookings = function_exists('hl_screen_pending_bookings') ? hl_screen_pending_bookings($db) : [];
+$bookingOn = hl_get_setting('screens_booking_enabled', '1') === '1';
 
 function screen_player_link($base, $slug) {
     $base = trim($base);
@@ -232,6 +274,52 @@ function screen_media_url($base, $path) {
 hl_shell_head('Digital Screens', 'screens', hl_pending_count());
 if ($flash) hl_flash($flash, $flashType);
 ?>
+
+<?php if ($pendingBookings): ?>
+<div class="card" style="border:1px solid var(--accent, #3fb950)">
+  <div class="hd"><h2>🔔 Screen bookings awaiting approval (<?= count($pendingBookings) ?>)</h2></div>
+  <p class="sub" style="margin:0 0 10px">Customers booked and paid from the Telegram bot. Approve to put the ad live on the screen for its dates, or reject.</p>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Ad</th><th>Screen</th><th>Dates</th><th>Total</th><th>Payment</th><th></th></tr></thead>
+    <tbody>
+    <?php foreach ($pendingBookings as $b):
+        $item = $b['media_items'][0] ?? null;
+        $murl = $item ? screen_media_url($playerBase, $item['path'] ?? '') : '';
+        $mtype = $item['type'] ?? 'image';
+        $payLabel = $b['payment_status'] === 'paid' ? 'Paid (card)' : ($b['payment_status'] === 'awaiting_verification' ? 'Verify screenshot' : $b['payment_status']); ?>
+      <tr>
+        <td style="display:flex;align-items:center;gap:10px">
+          <?php if ($murl && $mtype === 'image'): ?>
+            <img src="<?= h($murl) ?>" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+          <?php elseif ($murl): ?>
+            <a class="pill mut" href="<?= h($murl) ?>" target="_blank" rel="noopener">Video</a>
+          <?php endif; ?>
+          <span><b><?= h($b['business_name'] ?: 'Ad') ?></b><br><span class="muted small">ref <?= h($b['payment_ref'] ?: '-') ?></span></span>
+        </td>
+        <td><?= h($b['screen_name'] ?: ('#' . $b['screen_id'])) ?><?php if (!empty($b['screen_location'])): ?><div class="muted small"><?= h($b['screen_location']) ?></div><?php endif; ?></td>
+        <td class="mono small"><?= h($b['start_date']) ?> &rarr; <?= h($b['end_date']) ?></td>
+        <td><?= h(hl_money((float) $b['price'])) ?></td>
+        <td><span class="pill <?= $b['payment_status'] === 'paid' ? 'ok' : 'mut' ?>"><?= h($payLabel) ?></span></td>
+        <td class="actions">
+          <form method="post" style="display:inline">
+            <input type="hidden" name="csrf" value="<?= $csrf ?>">
+            <input type="hidden" name="form" value="approve_booking">
+            <input type="hidden" name="booking_id" value="<?= (int) $b['id'] ?>">
+            <button class="btn sm" type="submit">Approve</button>
+          </form>
+          <form method="post" style="display:inline" onsubmit="return confirm('Reject this booking?');">
+            <input type="hidden" name="csrf" value="<?= $csrf ?>">
+            <input type="hidden" name="form" value="reject_booking">
+            <input type="hidden" name="booking_id" value="<?= (int) $b['id'] ?>">
+            <button class="btn red sm" type="submit">Reject</button>
+          </form>
+        </td>
+      </tr>
+    <?php endforeach; ?>
+    </tbody>
+  </table></div>
+</div>
+<?php endif; ?>
 
 <div class="card">
   <div class="hd"><h2>How this works</h2></div>
@@ -286,6 +374,20 @@ if ($flash) hl_flash($flash, $flashType);
       <button type="submit">Save</button>
     </form>
   </div>
+</div>
+
+<div class="card">
+  <div class="hd"><h2>Customer booking from the bot</h2></div>
+  <p class="sub" style="margin:0 0 10px">When ON, customers can book and pay for a screen right inside the Telegram bot (Advertise on a Screen). Their booking lands in the approval queue above. Turn OFF to pause new bookings without affecting anything already live.</p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="booking_toggle">
+    <label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:600">
+      <input type="checkbox" name="enabled" value="1" style="width:17px;height:17px" <?= $bookingOn ? 'checked' : '' ?>>
+      Allow customers to book screens from the bot
+    </label>
+    <button type="submit" style="margin-top:12px">Save</button>
+  </form>
 </div>
 
 <div class="card">

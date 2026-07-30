@@ -72,8 +72,44 @@ reach *in* to the server, so it runs fine even though inbound webhooks are
 blocked here (the same reason the bot polls). An ad only reaches a screen after
 it is **paid and approved**; pending/rejected ads never appear.
 
-## Coming next (Milestone 2 / 3)
-- M2: the in-bot booking flow (pick screen → dates → upload flyer → pay) and the
-  admin approval queue for screen bookings.
-- M3: the scheduler auto-flips bookings live on their start date and expired
-  after the end date (rides the existing cron); optional Xibo/OptiSigns playout.
+## Milestone 2 — customers book screens from the Telegram bot
+
+Customers can now advertise on a screen themselves, right inside the bot, and
+you approve each booking before it appears.
+
+Customer flow (bot menu → **Advertise on a Screen**):
+1. Pick a screen (each shows its location and price).
+2. Choose a start date (next 14 days) and how long to run (1 day → 30 days).
+3. Pay — card (Stripe) or Zelle / Cash App with a screenshot. The price is the
+   screen's rate × the days booked. A screen already booked for those dates is
+   blocked automatically (one advertiser per screen at a time).
+4. Upload the flyer — image or video (up to 5).
+5. Review and submit. The booking is saved as **pending**.
+
+Your approval:
+- You get a Telegram message with the flyer, payment info and **Approve / Reject**
+  buttons. The same queue appears in **Admin → Digital Screens → "Screen bookings
+  awaiting approval"** (with Approve / Reject there too).
+- On **Approve**, the ad goes live on the screen for its booked dates
+  automatically (it joins the same playlist as house ads) and the customer is
+  notified in Telegram. On **Reject**, the customer is notified.
+
+Turn the whole thing on/off with the **"Customer booking from the bot"** switch on
+the Digital Screens page — pausing it never touches anything already live.
+
+### Files to upload for Milestone 2
+| File | Where it goes |
+|------|----------------|
+| `includes/screens.php` | bot folder → `includes/` (adds the booking helpers) |
+| `includes/screen_booking.php` | bot folder → `includes/` (the booking flow) |
+| `webhook.php` | bot folder (adds the menu item + routing) |
+| `admin/screens.php` | admin panel folder → `admin/` (approval queue + on/off) |
+
+Uploaded flyers are saved in the bot's `uploads/screens/` folder (same place as
+house ads) and served by `player.php`, so the bot folder must be writable.
+
+## Coming next (Milestone 3)
+- M3: a cron pass that flips bookings to `live` on their start date and `expired`
+  after the end date (rides the existing scheduler cron), plus proof-of-play
+  reporting; optional Xibo / OptiSigns playout. Today the player already shows
+  only in-date approved bookings, so this is a reporting/robustness upgrade.

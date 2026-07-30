@@ -9,7 +9,11 @@ require_once __DIR__ . '/includes/promotion.php';
 // than crash the whole poller on a missing include.
 if (is_file(__DIR__ . '/includes/stripe.php')) require_once __DIR__ . '/includes/stripe.php';
 require_once __DIR__ . '/includes/scheduler.php'; // for HL_Scheduler::renderPostText() preview
-require_once __DIR__ . '/includes/referral.php';  // Invite & Earn engine + screens
+require_once __DIR__ . '/includes/referral.php';  // Invite & Earn engine
+// Digital Screen Advertising: the data layer + the in-bot booking flow. Both are
+// optional-at-load so a not-yet-uploaded file can never crash the poller.
+if (is_file(__DIR__ . '/includes/screens.php'))        require_once __DIR__ . '/includes/screens.php';
+if (is_file(__DIR__ . '/includes/screen_booking.php')) require_once __DIR__ . '/includes/screen_booking.php';
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
@@ -190,6 +194,22 @@ function handleCallbackQuery($query) {
     if (strpos($data, 'promo_reject_') === 0) { promoModerate($userId, (int)substr($data, 13), 'reject'); return; }
     if ($data === 'promo_admin_menu') { promoAdminMenu($userId); return; }
     if (strpos($data, 'promoset_') === 0) { promoAdminEdit($userId, substr($data, 9)); return; }
+
+    // ---- Digital Screen Advertising (in-bot booking) ----
+    if (function_exists('scrStart')) {
+        if ($data === 'scr_start')  { handleAction($userId, 'screens'); return; }
+        if ($data === 'scr_cancel') { scrCancel($userId); return; }
+        if (strpos($data, 'scrpick_')    === 0) { scrPickScreen($userId, (int) substr($data, 8), $state); return; }
+        if (strpos($data, 'scrdate_')    === 0) { scrPickDate($userId, substr($data, 8), $state); return; }
+        if (strpos($data, 'scrdur_')     === 0) { scrPickDuration($userId, (int) substr($data, 7), $state); return; }
+        if (strpos($data, 'scrpay_')     === 0) { scrHandlePayMethod($userId, substr($data, 7), $state); return; }
+        if ($data === 'scr_check_card')  { scrCheckCard($userId, $state); return; }
+        if ($data === 'scr_paid_manual') { scrManualProceed($userId, $state, null); return; }
+        if ($data === 'scr_media_done')  { scrMediaDone($userId, $state); return; }
+        if ($data === 'scr_submit')      { scrSubmit($userId, $state); return; }
+        if (strpos($data, 'scrapprove_') === 0) { scrModerate($userId, (int) substr($data, 11), 'approve'); return; }
+        if (strpos($data, 'scrreject_')  === 0) { scrModerate($userId, (int) substr($data, 10), 'reject'); return; }
+    }
 
     // ---- Preview + scheduling picker ----
 
@@ -599,16 +619,22 @@ function handleMessage($msg) {
         if (strpos($ps['state'], 'promo_') === 0) {
             if (promoHandlePhoto($userId, $msg)) return;
         }
+        if (strpos($ps['state'], 'scr_') === 0 && function_exists('scrHandlePhoto')) {
+            if (scrHandlePhoto($userId, $msg)) return;
+        }
         if (handlePhotoMessage($userId, $msg)) return;
     }
 
-    // Video messages in private chat (promotion media step accepts videos too)
+    // Video messages in private chat (promotion + screen media steps accept videos too)
     $isVideoMsg = isset($msg['video']) ||
         (isset($msg['document']['mime_type']) && strpos($msg['document']['mime_type'], 'video/') === 0);
     if ($isPrivate && $isVideoMsg) {
         $vs = $db->getState($userId);
         if (strpos($vs['state'], 'promo_') === 0) {
             if (promoHandleVideo($userId, $msg)) return;
+        }
+        if (strpos($vs['state'], 'scr_') === 0 && function_exists('scrHandleVideo')) {
+            if (scrHandleVideo($userId, $msg)) return;
         }
     }
 
@@ -632,6 +658,12 @@ function handleStateInput($userId, $msg) {
     // Route all Promote-My-Business states to the promotion module
     if (strpos($state['state'], 'promo_') === 0) {
         promoHandleStateInput($userId, $msg, $state);
+        return;
+    }
+
+    // Route all screen-booking states to the screen booking module
+    if (strpos($state['state'], 'scr_') === 0 && function_exists('scrHandleStateInput')) {
+        scrHandleStateInput($userId, $msg, $state);
         return;
     }
 
@@ -1310,6 +1342,21 @@ function handleAction($userId, $action) {
                 break;
             }
             promoStartBotw($userId);
+            break;
+        case 'screens':
+            if (!function_exists('scrStart')) { showMainMenu($userId, ($db->getUser($userId)['name'] ?? 'there')); break; }
+            if (!$db->getUser($userId)) {
+                startRegistration($userId, 'screens');
+                break;
+            }
+            scrStart($userId);
+            break;
+        case 'scrpaid':
+            // Return from Stripe checkout (success) for a screen booking.
+            if (function_exists('scrReturnFromCheckout')) scrReturnFromCheckout($userId);
+            break;
+        case 'scrpaycancel':
+            if (function_exists('scrReturnFromCancel')) scrReturnFromCancel($userId);
             break;
         case 'contact':
             showContactInfo($userId);
@@ -2004,6 +2051,7 @@ function showMainMenu($userId, $name) {
         [
             [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
+            [['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Advertise on a Screen", 'callback_data' => 'scr_start']],
             [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'callback_data' => 'botw']],
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
             [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
@@ -2054,6 +2102,7 @@ function sendGroupButtons($chatId) {
         [
             [['text' => "\xF0\x9F\x93\x9D Post to Website (FREE)", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
+            [['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Advertise on a Screen", 'url' => "https://t.me/{$botUsername}?start=screens"]],
             [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'url' => "https://t.me/{$botUsername}?start=botw"]],
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'url' => "https://t.me/{$botUsername}?start=contact"]],
