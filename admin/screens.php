@@ -10,7 +10,31 @@
  */
 require __DIR__ . '/lib.php';
 require __DIR__ . '/view.php';
-require __DIR__ . '/../includes/screens.php';
+
+// Locate the screens module. The panel folder may live next to the bot folder
+// (bizadmin + bot as siblings) or inside it, so we derive the bot root from the
+// shared DB path (hl_bot_root) and fall back to a few known layouts.
+$__screens_lib = '';
+foreach ([
+    (function_exists('hl_bot_root') && hl_bot_root() !== '') ? hl_bot_root() . '/includes/screens.php' : null,
+    __DIR__ . '/../includes/screens.php',      // panel inside the bot folder
+    __DIR__ . '/../bot/includes/screens.php',  // panel is a sibling of the bot folder
+    __DIR__ . '/../../bot/includes/screens.php',
+] as $__c) {
+    if ($__c && is_file($__c)) { $__screens_lib = $__c; break; }
+}
+if ($__screens_lib === '') {
+    hl_require_login();
+    hl_shell_head('Digital Screens');
+    echo '<div class="card"><div class="bd"><h2>Digital Screens</h2>'
+       . '<p class="muted">The screens module file <code>includes/screens.php</code> was not '
+       . 'found next to the bot. Upload <code>includes/screens.php</code> into the bot folder '
+       . '(the same folder that has <code>webhook.php</code> and <code>data/bot.sqlite</code>), '
+       . 'then reload this page.</p></div></div>';
+    hl_shell_foot();
+    exit;
+}
+require $__screens_lib;
 hl_require_login();
 
 $db = hl_db();

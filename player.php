@@ -33,7 +33,24 @@
  * the whole feature runs fine even though inbound webhooks are blocked here.
  */
 
-require __DIR__ . '/includes/screens.php';
+// Locate the screens module regardless of where player.php is dropped (inside the
+// bot folder, in the web root with the bot in a subfolder, or beside the bot folder).
+$__pl_lib = '';
+foreach ([
+    __DIR__ . '/includes/screens.php',        // player.php is inside the bot folder
+    __DIR__ . '/bot/includes/screens.php',    // player.php in web root, bot in /bot
+    __DIR__ . '/../bot/includes/screens.php',  // player.php beside the bot folder
+    __DIR__ . '/../includes/screens.php',
+] as $__c) {
+    if (is_file($__c)) { $__pl_lib = $__c; break; }
+}
+if ($__pl_lib === '') {
+    http_response_code(500);
+    header('Content-Type: text/plain; charset=utf-8');
+    exit('Screen player not fully installed: includes/screens.php was not found. '
+       . 'Place player.php inside the bot folder (next to includes/ and data/).');
+}
+require $__pl_lib;
 
 // --- Locate the shared bot database (read-only use here) --------------------
 if (!defined('SCREENS_DB_PATH')) {
