@@ -294,3 +294,81 @@ function hl_screen_touch(SQLite3 $db, $screenId, $nowUtc) {
     $st->bindValue(':id', (int) $screenId, SQLITE3_INTEGER);
     $st->execute();
 }
+
+// ---------------------------------------------------------------------------
+// House ads
+//
+// Milestone 1 has no advertiser-facing booking flow yet (that is Milestone 2:
+// pick screen -> dates -> upload flyer -> pay). But the owner still needs to put
+// their OWN content on a screen from day one - promotions for the venue, a menu,
+// a welcome slide - and they need to SEE the player actually playing something.
+//
+// A "house ad" is exactly that: a booking the admin creates directly. It is
+// stored in the same screen_bookings table as a paid + approved booking so it
+// flows through the identical playlist path a real paid ad will - no special
+// case in the player. When the Milestone 2 booking flow lands, paid advertiser
+// bookings simply join these in the same list.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a booking directly from the admin (a "house ad"). $media is an ordered
+ * array of ['path','type','dwell'] items. It is stored paid + approved so it is
+ * live immediately for the given date range. Returns the new booking id.
+ */
+function hl_screen_add_house_ad(SQLite3 $db, $screenId, array $media, $start, $end, $label = 'House ad') {
+    $clean = [];
+    foreach ($media as $m) {
+        if (empty($m['path'])) continue;
+        $clean[] = [
+            'path'  => (string) $m['path'],
+            'type'  => in_array(($m['type'] ?? ''), ['image', 'video'], true) ? $m['type'] : hl_screen_media_type($m['path']),
+            'dwell' => (int) ($m['dwell'] ?? 10) ?: 10,
+        ];
+    }
+    if (!$clean) return 0;
+    $st = $db->prepare("
+        INSERT INTO screen_bookings
+            (screen_id, telegram_id, business_name, media, start_date, end_date,
+             price, payment_status, payment_ref, status)
+        VALUES
+            (:sid, NULL, :label, :media, :start, :end,
+             0, 'paid', 'house', 'approved')");
+    $st->bindValue(':sid', (int) $screenId, SQLITE3_INTEGER);
+    $st->bindValue(':label', (string) $label, SQLITE3_TEXT);
+    $st->bindValue(':media', json_encode(array_values($clean)), SQLITE3_TEXT);
+    $st->bindValue(':start', (string) $start, SQLITE3_TEXT);
+    $st->bindValue(':end', (string) $end, SQLITE3_TEXT);
+    $st->execute();
+    return $db->lastInsertRowID();
+}
+
+/** All bookings on a screen, newest first (admin view of what is / was scheduled). */
+function hl_screen_bookings(SQLite3 $db, $screenId) {
+    $rows = [];
+    $st = $db->prepare("SELECT * FROM screen_bookings WHERE screen_id = :id ORDER BY id DESC");
+    $st->bindValue(':id', (int) $screenId, SQLITE3_INTEGER);
+    $res = $st->execute();
+    while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
+        $r['media_items'] = json_decode((string) $r['media'], true) ?: [];
+        $rows[] = $r;
+    }
+    return $rows;
+}
+
+function hl_screen_booking_by_id(SQLite3 $db, $bookingId) {
+    $st = $db->prepare("SELECT * FROM screen_bookings WHERE id = :id");
+    $st->bindValue(':id', (int) $bookingId, SQLITE3_INTEGER);
+    $res = $st->execute();
+    return $res ? ($res->fetchArray(SQLITE3_ASSOC) ?: null) : null;
+}
+
+/** Delete a booking. Returns its media item list so the caller can unlink files. */
+function hl_screen_delete_booking(SQLite3 $db, $bookingId) {
+    $b = hl_screen_booking_by_id($db, $bookingId);
+    if (!$b) return [];
+    $media = json_decode((string) $b['media'], true) ?: [];
+    $st = $db->prepare("DELETE FROM screen_bookings WHERE id = :id");
+    $st->bindValue(':id', (int) $bookingId, SQLITE3_INTEGER);
+    $st->execute();
+    return $media;
+}

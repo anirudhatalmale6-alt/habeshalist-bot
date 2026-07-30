@@ -37,8 +37,21 @@ if ($__screens_lib === '') {
 require $__screens_lib;
 hl_require_login();
 
+// The bot folder that owns the module (…/bot/includes/screens.php → …/bot).
+// House-ad uploads are written here, under uploads/screens/, so the public
+// player (which lives in this same bot folder) serves them same-origin.
+$__bot_root = dirname(dirname($__screens_lib));
+
 $db = hl_db();
 hl_screens_ensure_schema($db);
+
+/** Absolute path to the house-ad uploads folder, creating it on first use. */
+function hl_screen_upload_dir() {
+    global $__bot_root;
+    $dir = $__bot_root . '/uploads/screens';
+    if (!is_dir($dir)) @mkdir($dir, 0755, true);
+    return $dir;
+}
 
 $flash = null; $flashType = 'ok';
 
@@ -127,6 +140,68 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $st->execute();
             $flash = 'Screen deleted.';
         }
+
+    } elseif ($form === 'add_ad') {
+        // Put the owner's own image/video straight onto a screen ("house ad").
+        // Accepts either an uploaded file or a media URL. Stored paid+approved so
+        // it is live right away - this is how the player finally shows something.
+        $sid = (int) ($_POST['screen_id'] ?? 0);
+        $sc  = $sid ? hl_screen_by_id($db, $sid) : null;
+        if (!$sc) { $flash = 'Unknown screen.'; $flashType = 'err'; }
+        else {
+            $dwell = max(3, (int) ($_POST['dwell'] ?? $sc['dwell_seconds'] ?? 10));
+            $path = ''; $type = '';
+            $allowed = array_merge(HL_SCREEN_IMAGE_EXT, HL_SCREEN_VIDEO_EXT);
+
+            if (!empty($_FILES['adfile']['name']) && ($_FILES['adfile']['error'] ?? 4) === UPLOAD_ERR_OK) {
+                $ext = strtolower(pathinfo($_FILES['adfile']['name'], PATHINFO_EXTENSION));
+                if (!in_array($ext, $allowed, true)) {
+                    $flash = 'That file type is not supported. Use JPG, PNG, WEBP, GIF or MP4/WEBM/MOV.'; $flashType = 'err';
+                } elseif (($_FILES['adfile']['size'] ?? 0) > 60 * 1024 * 1024) {
+                    $flash = 'That file is over 60 MB. Please upload a smaller image or a compressed video.'; $flashType = 'err';
+                } else {
+                    $dir = hl_screen_upload_dir();
+                    $fname = bin2hex(random_bytes(8)) . '.' . $ext;
+                    if (@move_uploaded_file($_FILES['adfile']['tmp_name'], $dir . '/' . $fname)) {
+                        // Relative to the bot folder, where player.php also lives, so
+                        // the browser resolves it against the player's own URL.
+                        $path = 'uploads/screens/' . $fname;
+                        $type = in_array($ext, HL_SCREEN_VIDEO_EXT, true) ? 'video' : 'image';
+                    } else {
+                        $flash = 'Could not save the upload. Make sure the bot folder is writable, or paste a media URL instead.'; $flashType = 'err';
+                    }
+                }
+            } elseif (trim($_POST['media_url'] ?? '') !== '') {
+                $path = trim($_POST['media_url']);
+                $type = hl_screen_media_type($path);
+            } else {
+                $flash = 'Choose a file to upload or paste an image/video URL.'; $flashType = 'err';
+            }
+
+            if ($path !== '' && $flashType !== 'err') {
+                $start = date('Y-m-d', time() - 2 * 86400);   // backdate so it is live regardless of screen timezone
+                $end   = date('Y-m-d', time() + 730 * 86400); // ~2 years
+                $label = trim($_POST['ad_label'] ?? '') ?: 'House ad';
+                $bid = hl_screen_add_house_ad($db, $sid, [['path' => $path, 'type' => $type, 'dwell' => $dwell]], $start, $end, $label);
+                $flash = $bid ? 'Ad added - it is playing on the screen now. Open its player link to see it.' : 'Could not add the ad.';
+                if (!$bid) $flashType = 'err';
+            }
+        }
+
+    } elseif ($form === 'del_ad') {
+        $bid = (int) ($_POST['booking_id'] ?? 0);
+        if ($bid) {
+            $media = hl_screen_delete_booking($db, $bid);
+            // Remove any local upload files this booking owned (never touch URLs).
+            foreach ($media as $m) {
+                $p = (string) ($m['path'] ?? '');
+                if (strpos($p, 'uploads/screens/') === 0) {
+                    $abs = $__bot_root . '/' . $p;
+                    if (is_file($abs)) @unlink($abs);
+                }
+            }
+            $flash = 'Ad removed.';
+        }
     }
 }
 
@@ -142,6 +217,16 @@ function screen_player_link($base, $slug) {
     if ($base === '') return '';
     $sep = (strpos($base, '?') !== false) ? '&' : '?';
     return $base . $sep . 's=' . $slug;
+}
+
+/** Public URL for a media item so the admin can preview it. Absolute URLs pass
+ *  through; a relative upload path is resolved against the player's folder. */
+function screen_media_url($base, $path) {
+    $path = trim((string) $path);
+    if ($path === '' || preg_match('#^https?://#i', $path)) return $path;
+    $base = trim($base);
+    if ($base === '') return $path; // still valid relative to player.php on the screen
+    return preg_replace('#/[^/]*$#', '/', $base) . $path;
 }
 
 hl_shell_head('Digital Screens', 'screens', hl_pending_count());
@@ -270,6 +355,88 @@ if ($flash) hl_flash($flash, $flashType);
     <button type="submit"><?= $editing ? 'Save changes' : 'Add screen' ?></button>
   </form>
 </div>
+
+<?php if ($editing):
+    $ads = hl_screen_bookings($db, $editing['id']);
+    $adLink = screen_player_link($playerBase, $editing['slug']); ?>
+<div class="card">
+  <div class="hd"><h2>Content on this screen</h2></div>
+  <p class="sub" style="margin:0 0 4px">
+    Put your own image or short video on <b><?= h($editing['name']) ?></b> right now (a promo, menu, or
+    welcome slide). It starts playing immediately and rotates with any paid ads. This is how you get
+    something on the screen today - the advertiser self-booking flow comes in the next milestone.
+  </p>
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:12px">
+    <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="add_ad">
+    <input type="hidden" name="screen_id" value="<?= (int) $editing['id'] ?>">
+    <div class="row">
+      <div class="field"><label>Upload image or video</label>
+        <input type="file" name="adfile" accept="image/*,video/*"
+               style="width:100%;padding:8px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text)"></div>
+      <div class="field" style="max-width:150px"><label>Show for (seconds)</label>
+        <input type="number" name="dwell" min="3" value="<?= h($editing['dwell_seconds'] ?? 10) ?>"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>...or paste a media URL</label>
+        <input type="text" name="media_url" placeholder="https://... .jpg / .png / .mp4"></div>
+      <div class="field"><label>Label (optional)</label>
+        <input type="text" name="ad_label" placeholder="e.g. Weekend special"></div>
+    </div>
+    <div class="muted small" style="margin:2px 0 12px">Images: JPG, PNG, WEBP, GIF. Video: MP4, WEBM, MOV (kept muted in the ad loop). Max 60 MB.</div>
+    <button type="submit">Add to screen</button>
+  </form>
+
+  <?php if ($ads): ?>
+  <div class="tblwrap" style="margin-top:16px"><table>
+    <thead><tr><th>Preview</th><th>Details</th><th>Dates</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    <?php foreach ($ads as $b):
+        $item = $b['media_items'][0] ?? null;
+        $murl = $item ? screen_media_url($playerBase, $item['path'] ?? '') : '';
+        $mtype = $item['type'] ?? 'image'; ?>
+      <tr>
+        <td>
+          <?php if ($murl && $mtype === 'image'): ?>
+            <img src="<?= h($murl) ?>" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
+          <?php elseif ($murl): ?>
+            <span class="pill mut">Video</span>
+          <?php else: ?>
+            <span class="muted small">-</span>
+          <?php endif; ?>
+        </td>
+        <td>
+          <b><?= h($b['business_name'] ?: 'Ad') ?></b>
+          <div class="muted small"><?= count($b['media_items']) ?> item(s) &middot; <?= h($mtype) ?>
+            <?php if ($murl): ?>&middot; <a class="small" href="<?= h($murl) ?>" target="_blank" rel="noopener">open</a><?php endif; ?></div>
+        </td>
+        <td class="mono small"><?= h($b['start_date']) ?> &rarr; <?= h($b['end_date']) ?></td>
+        <td>
+          <?php $live = ($b['status'] === 'approved' || $b['status'] === 'live') && $b['payment_status'] === 'paid'; ?>
+          <?php if ($live): ?><span class="pill ok">Live</span><?php else: ?><span class="pill mut"><?= h(ucfirst($b['status'])) ?></span><?php endif; ?>
+        </td>
+        <td class="actions">
+          <form method="post" style="display:inline" onsubmit="return confirm('Remove this ad from the screen?');">
+            <input type="hidden" name="csrf" value="<?= $csrf ?>">
+            <input type="hidden" name="form" value="del_ad">
+            <input type="hidden" name="booking_id" value="<?= (int) $b['id'] ?>">
+            <button class="btn red sm" type="submit">Remove</button>
+          </form>
+        </td>
+      </tr>
+    <?php endforeach; ?>
+    </tbody>
+  </table></div>
+  <?php else: ?>
+    <div class="empty" style="margin-top:14px">Nothing on this screen yet - add an image or video above and it plays instantly.</div>
+  <?php endif; ?>
+
+  <?php if ($adLink): ?>
+    <p class="sub" style="margin:12px 0 0">Screen link: <a class="mono small" href="<?= h($adLink) ?>" target="_blank" rel="noopener">Open player</a></p>
+  <?php endif; ?>
+</div>
+<?php endif; ?>
 
 <div class="card">
   <div class="hd"><h2>Screens<?= $screens ? ' (' . count($screens) . ')' : '' ?></h2></div>
