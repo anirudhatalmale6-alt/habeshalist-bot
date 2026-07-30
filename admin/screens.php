@@ -39,11 +39,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($name === '') { $flash = 'Give the screen a name.'; $flashType = 'err'; }
         else {
             $id = hl_screen_create($db, [
-                'name'          => $name,
-                'location'      => $_POST['location'] ?? '',
-                'orientation'   => $_POST['orientation'] ?? 'landscape',
-                'resolution'    => $_POST['resolution'] ?? '1920x1080',
-                'dwell_seconds' => $_POST['dwell_seconds'] ?? 10,
+                'name'                => $name,
+                'location'            => $_POST['location'] ?? '',
+                'orientation'         => $_POST['orientation'] ?? 'portrait',
+                'resolution'          => $_POST['resolution'] ?? '1080x1920',
+                'dwell_seconds'       => $_POST['dwell_seconds'] ?? 10,
+                'interactive'         => isset($_POST['interactive']) ? 1 : 0,
+                'website_url'         => $_POST['website_url'] ?? '',
+                'attract_seconds'     => $_POST['attract_seconds'] ?? 180,
+                'idle_return_seconds' => $_POST['idle_return_seconds'] ?? 60,
             ]);
             if (isset($_POST['rate']) && is_numeric($_POST['rate']) && $_POST['rate'] !== '') {
                 hl_screen_set_rate($db, $id, (float) $_POST['rate'], $_POST['unit'] ?? 'day');
@@ -55,12 +59,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $id = (int) ($_POST['id'] ?? 0);
         if ($id && hl_screen_by_id($db, $id)) {
             hl_screen_update($db, $id, [
-                'name'          => $_POST['name'] ?? '',
-                'location'      => $_POST['location'] ?? '',
-                'orientation'   => $_POST['orientation'] ?? 'landscape',
-                'resolution'    => $_POST['resolution'] ?? '1920x1080',
-                'dwell_seconds' => $_POST['dwell_seconds'] ?? 10,
-                'status'        => $_POST['status'] ?? 'active',
+                'name'                => $_POST['name'] ?? '',
+                'location'            => $_POST['location'] ?? '',
+                'orientation'         => $_POST['orientation'] ?? 'portrait',
+                'resolution'          => $_POST['resolution'] ?? '1080x1920',
+                'dwell_seconds'       => $_POST['dwell_seconds'] ?? 10,
+                'status'              => $_POST['status'] ?? 'active',
+                'interactive'         => isset($_POST['interactive']) ? 1 : 0,
+                'website_url'         => $_POST['website_url'] ?? '',
+                'attract_seconds'     => $_POST['attract_seconds'] ?? 180,
+                'idle_return_seconds' => $_POST['idle_return_seconds'] ?? 60,
             ]);
             if (isset($_POST['rate']) && $_POST['rate'] !== '' && is_numeric($_POST['rate'])) {
                 hl_screen_set_rate($db, $id, (float) $_POST['rate'], $_POST['unit'] ?? 'day');
@@ -187,11 +195,11 @@ if ($flash) hl_flash($flash, $flashType);
     <div class="row">
       <div class="field" style="max-width:170px"><label>Orientation</label>
         <select name="orientation" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text);font-size:15px">
-          <option value="landscape" <?= ($editing['orientation'] ?? 'landscape') === 'landscape' ? 'selected' : '' ?>>Landscape</option>
-          <option value="portrait"  <?= ($editing['orientation'] ?? '') === 'portrait' ? 'selected' : '' ?>>Portrait</option>
+          <option value="portrait"  <?= ($editing['orientation'] ?? 'portrait') === 'portrait' ? 'selected' : '' ?>>Portrait</option>
+          <option value="landscape" <?= ($editing['orientation'] ?? '') === 'landscape' ? 'selected' : '' ?>>Landscape</option>
         </select></div>
       <div class="field" style="max-width:150px"><label>Resolution</label>
-        <input type="text" name="resolution" value="<?= h($editing['resolution'] ?? '1920x1080') ?>" placeholder="1920x1080"></div>
+        <input type="text" name="resolution" value="<?= h($editing['resolution'] ?? '1080x1920') ?>" placeholder="1080x1920"></div>
       <div class="field" style="max-width:150px"><label>Image seconds</label>
         <input type="number" name="dwell_seconds" min="3" value="<?= h($editing['dwell_seconds'] ?? 10) ?>"></div>
     </div>
@@ -213,6 +221,28 @@ if ($flash) hl_flash($flash, $flashType);
         </select></div>
       <?php endif; ?>
     </div>
+
+    <div style="margin:18px 0 6px;padding-top:14px;border-top:1px solid var(--line)">
+      <label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:600">
+        <input type="checkbox" name="interactive" value="1" style="width:17px;height:17px"
+          <?= (!$editing || !empty($editing['interactive'])) ? 'checked' : '' ?>>
+        Interactive touchscreen mode
+      </label>
+      <div class="muted small" style="margin:4px 0 0 26px">
+        The screen runs the ad loop, then periodically opens the HabeshaList website
+        so visitors can tap to browse posts, events and videos with sound. It returns
+        to the ads on its own after a period of no touching.
+      </div>
+    </div>
+    <div class="row">
+      <div class="field"><label>Website to open (optional)</label>
+        <input type="text" name="website_url" value="<?= h($editing['website_url'] ?? '') ?>" placeholder="blank = habeshalist.com"></div>
+      <div class="field" style="max-width:180px"><label>Open site after (seconds)</label>
+        <input type="number" name="attract_seconds" min="15" value="<?= h($editing['attract_seconds'] ?? 180) ?>"></div>
+      <div class="field" style="max-width:180px"><label>Return to ads after idle (seconds)</label>
+        <input type="number" name="idle_return_seconds" min="10" value="<?= h($editing['idle_return_seconds'] ?? 60) ?>"></div>
+    </div>
+
     <button type="submit"><?= $editing ? 'Save changes' : 'Add screen' ?></button>
   </form>
 </div>

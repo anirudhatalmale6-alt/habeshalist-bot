@@ -46,13 +46,20 @@ function hl_screens_ensure_schema(SQLite3 $db) {
             slug          TEXT UNIQUE NOT NULL,       -- unguessable token in the public URL
             name          TEXT NOT NULL,
             location      TEXT,
-            orientation   TEXT DEFAULT 'landscape',   -- landscape | portrait
-            resolution    TEXT DEFAULT '1920x1080',   -- informational
+            orientation   TEXT DEFAULT 'portrait',    -- portrait | landscape (pilot is portrait-first)
+            resolution    TEXT DEFAULT '1080x1920',   -- informational
             dwell_seconds INTEGER DEFAULT 10,         -- seconds each image shows in the loop
             status        TEXT DEFAULT 'active',      -- active | paused
+            -- Interactive kiosk mode: the screen periodically switches from the
+            -- passive ad loop to a touch-browsable view of the HabeshaList site.
+            interactive         INTEGER DEFAULT 1,    -- 1 = enable website mode on this touchscreen
+            website_url         TEXT DEFAULT '',      -- blank = site default (habeshalist.com)
+            attract_seconds     INTEGER DEFAULT 180,  -- ad loop runs this long, then auto-opens the site
+            idle_return_seconds INTEGER DEFAULT 60,   -- in site mode, return to ads after this much no-touch
             last_seen     TEXT,                       -- heartbeat from the player (proof-of-play seed)
             created_at    TEXT DEFAULT (datetime('now'))
         )");
+    hl_screens_migrate($db);
     $db->exec("
         CREATE TABLE IF NOT EXISTS screen_pricing (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +86,26 @@ function hl_screens_ensure_schema(SQLite3 $db) {
     // Helpful indexes for the two hot queries (availability + what-plays-now).
     $db->exec("CREATE INDEX IF NOT EXISTS idx_sb_screen_dates ON screen_bookings(screen_id, start_date, end_date)");
     $db->exec("CREATE INDEX IF NOT EXISTS idx_sb_status ON screen_bookings(status)");
+}
+
+/**
+ * Add any columns introduced after a screen table already existed. SQLite has no
+ * "ADD COLUMN IF NOT EXISTS", so we diff against PRAGMA table_info and ALTER the
+ * gaps. Safe/idempotent - a no-op once every column is present.
+ */
+function hl_screens_migrate(SQLite3 $db) {
+    $have = [];
+    $res = $db->query("PRAGMA table_info(screens)");
+    while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $have[$r['name']] = true; }
+    $add = [
+        'interactive'         => "INTEGER DEFAULT 1",
+        'website_url'         => "TEXT DEFAULT ''",
+        'attract_seconds'     => "INTEGER DEFAULT 180",
+        'idle_return_seconds' => "INTEGER DEFAULT 60",
+    ];
+    foreach ($add as $col => $decl) {
+        if (empty($have[$col])) $db->exec("ALTER TABLE screens ADD COLUMN {$col} {$decl}");
+    }
 }
 
 /** An unguessable URL-safe token for a screen's public player link. */
@@ -199,15 +226,21 @@ function hl_screen_is_available(SQLite3 $db, $screenId, $start, $end, $ignoreBoo
 
 function hl_screen_create(SQLite3 $db, array $d) {
     $st = $db->prepare("
-        INSERT INTO screens (slug, name, location, orientation, resolution, dwell_seconds, status)
-        VALUES (:slug, :name, :loc, :ori, :res, :dwell, 'active')");
+        INSERT INTO screens (slug, name, location, orientation, resolution, dwell_seconds, status,
+                             interactive, website_url, attract_seconds, idle_return_seconds)
+        VALUES (:slug, :name, :loc, :ori, :res, :dwell, 'active',
+                :inter, :wurl, :attract, :idle)");
     $st->bindValue(':slug', hl_screen_new_slug(), SQLITE3_TEXT);
     $st->bindValue(':name', trim($d['name'] ?? ''), SQLITE3_TEXT);
     $st->bindValue(':loc', trim($d['location'] ?? ''), SQLITE3_TEXT);
-    $ori = in_array($d['orientation'] ?? '', HL_SCREEN_ORIENTATIONS, true) ? $d['orientation'] : 'landscape';
+    $ori = in_array($d['orientation'] ?? '', HL_SCREEN_ORIENTATIONS, true) ? $d['orientation'] : 'portrait';
     $st->bindValue(':ori', $ori, SQLITE3_TEXT);
-    $st->bindValue(':res', trim($d['resolution'] ?? '1920x1080'), SQLITE3_TEXT);
+    $st->bindValue(':res', trim($d['resolution'] ?? '1080x1920'), SQLITE3_TEXT);
     $st->bindValue(':dwell', max(3, (int) ($d['dwell_seconds'] ?? 10)), SQLITE3_INTEGER);
+    $st->bindValue(':inter', !empty($d['interactive']) ? 1 : 0, SQLITE3_INTEGER);
+    $st->bindValue(':wurl', trim($d['website_url'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':attract', max(15, (int) ($d['attract_seconds'] ?? 180)), SQLITE3_INTEGER);
+    $st->bindValue(':idle', max(10, (int) ($d['idle_return_seconds'] ?? 60)), SQLITE3_INTEGER);
     $st->execute();
     return $db->lastInsertRowID();
 }
@@ -216,16 +249,22 @@ function hl_screen_update(SQLite3 $db, $id, array $d) {
     $st = $db->prepare("
         UPDATE screens
         SET name = :name, location = :loc, orientation = :ori,
-            resolution = :res, dwell_seconds = :dwell, status = :status
+            resolution = :res, dwell_seconds = :dwell, status = :status,
+            interactive = :inter, website_url = :wurl,
+            attract_seconds = :attract, idle_return_seconds = :idle
         WHERE id = :id");
     $st->bindValue(':name', trim($d['name'] ?? ''), SQLITE3_TEXT);
     $st->bindValue(':loc', trim($d['location'] ?? ''), SQLITE3_TEXT);
-    $ori = in_array($d['orientation'] ?? '', HL_SCREEN_ORIENTATIONS, true) ? $d['orientation'] : 'landscape';
+    $ori = in_array($d['orientation'] ?? '', HL_SCREEN_ORIENTATIONS, true) ? $d['orientation'] : 'portrait';
     $st->bindValue(':ori', $ori, SQLITE3_TEXT);
-    $st->bindValue(':res', trim($d['resolution'] ?? '1920x1080'), SQLITE3_TEXT);
+    $st->bindValue(':res', trim($d['resolution'] ?? '1080x1920'), SQLITE3_TEXT);
     $st->bindValue(':dwell', max(3, (int) ($d['dwell_seconds'] ?? 10)), SQLITE3_INTEGER);
     $status = in_array($d['status'] ?? '', ['active', 'paused'], true) ? $d['status'] : 'active';
     $st->bindValue(':status', $status, SQLITE3_TEXT);
+    $st->bindValue(':inter', !empty($d['interactive']) ? 1 : 0, SQLITE3_INTEGER);
+    $st->bindValue(':wurl', trim($d['website_url'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':attract', max(15, (int) ($d['attract_seconds'] ?? 180)), SQLITE3_INTEGER);
+    $st->bindValue(':idle', max(10, (int) ($d['idle_return_seconds'] ?? 60)), SQLITE3_INTEGER);
     $st->bindValue(':id', (int) $id, SQLITE3_INTEGER);
     $st->execute();
 }

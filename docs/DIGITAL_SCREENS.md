@@ -11,9 +11,30 @@ classifieds bot or the promotions engine. Disable it and nothing else changes.
   the default and per-screen price, and get each screen's public player link.
   Appears in the sidebar as **Digital Screens**.
 - **Player page** (`player.php`) — the public per-screen playout page you point a
-  TV / Raspberry Pi / Android TV box at. Rotating loop of the currently-live ads,
-  auto-refreshes every 60s, plays video muted, survives network drops, shows a
-  branded idle card when nothing is booked.
+  TV / Raspberry Pi / Android TV box / portrait touchscreen at. Rotating loop of the
+  currently-live ads, auto-refreshes every 60s, plays video muted, survives network
+  drops, shows a branded idle card when nothing is booked.
+
+### Interactive touchscreen mode (pilot default)
+Screens default to **portrait** and to **interactive** mode. Here the player is a
+two-mode kiosk:
+- **Ad loop (passive)** — muted rotating advertisements, the "attract" state.
+- **Website (interactive)** — after `attract_seconds`, or the moment someone taps
+  the screen, it opens the HabeshaList site in full screen. Visitors browse local
+  posts, events, listings and watch promotional videos **with sound** (sound is
+  allowed because a person has touched the screen). After `idle_return_seconds`
+  with no touch it slides back to the ad loop on its own. A "Tap to explore" hint
+  invites interaction; a small "Back to ads" button lets a visitor return manually.
+
+All four behaviours are per-screen and set in the admin form: the interactive
+checkbox, the website to open (blank = habeshalist.com), seconds-before-open, and
+seconds-idle-before-return.
+
+> **Hosting requirement for interactive mode:** the website view is shown in an
+> in-page frame, so `player.php` must be served from the **same domain** as the
+> site it opens (e.g. both on `habeshalist.com`). That is already the case here.
+> If you ever point it at a different domain that blocks framing, it will fall back
+> to the ad loop only.
 
 ## Files to upload
 | File | Where it goes |
@@ -31,8 +52,9 @@ existing tables. The three new tables are created automatically on first load.
 2. Set the **Player URL base** to the public address of `player.php`
    (e.g. `https://habeshalist.com/bot/player.php`).
 3. Set a **Default price**.
-4. **Add a screen**, then click its **Preview** link — that URL is what you open
-   on the physical screen's browser (put the browser in kiosk/full-screen mode).
+4. **Add a screen** (portrait + interactive are pre-selected), then click its
+   **Preview** link — that URL is what you open on the physical screen's browser
+   (put the browser in kiosk/full-screen mode).
 
 ## How it plays (why it works on this host)
 The TV **pulls** the playlist from us over plain GET requests — nothing has to
