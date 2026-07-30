@@ -52,6 +52,54 @@ if ($__pl_lib === '') {
 }
 require $__pl_lib;
 
+// The bot folder that owns the module (…/bot/includes/screens.php → …/bot). The
+// admin writes house-ad uploads under <bot>/uploads/screens/. player.php may be
+// dropped somewhere the browser cannot reach that folder by a relative path, so
+// we SERVE uploaded media through player.php itself (it resolves the bot folder
+// independently). This makes the image/video work no matter where player.php lives.
+$__pl_botroot = dirname(dirname($__pl_lib));
+
+// --- Media proxy: /player.php?media=<file> streams an uploaded house-ad file --
+if (isset($_GET['media'])) {
+    $name = basename((string) $_GET['media']);            // strip any path components
+    $ext  = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+    $allowed = array_merge(HL_SCREEN_IMAGE_EXT, HL_SCREEN_VIDEO_EXT);
+    $file = $__pl_botroot . '/uploads/screens/' . $name;
+    if (!preg_match('/^[A-Za-z0-9._-]+$/', $name) || !in_array($ext, $allowed, true) || !is_file($file)) {
+        http_response_code(404);
+        header('Content-Type: text/plain; charset=utf-8');
+        exit('Not found');
+    }
+    $types = [
+        'jpg' => 'image/jpeg', 'jpeg' => 'image/jpeg', 'png' => 'image/png',
+        'webp' => 'image/webp', 'gif' => 'image/gif',
+        'mp4' => 'video/mp4', 'webm' => 'video/webm', 'mov' => 'video/quicktime',
+    ];
+    header('Content-Type: ' . ($types[$ext] ?? 'application/octet-stream'));
+    header('Content-Length: ' . filesize($file));
+    header('Cache-Control: public, max-age=3600');
+    header('Accept-Ranges: bytes');
+    readfile($file);
+    exit;
+}
+
+/**
+ * Rewrite a playlist so locally-uploaded files are fetched THROUGH this player
+ * (player.php?media=<file>), which always resolves them correctly; absolute
+ * http(s) URLs are left untouched.
+ */
+function hl_player_public_playlist(array $playlist) {
+    $self = basename(__FILE__); // relative to this page's URL, e.g. "player.php"
+    foreach ($playlist as &$item) {
+        $p = (string) ($item['path'] ?? '');
+        if ($p !== '' && strpos($p, 'uploads/screens/') === 0 && !preg_match('#^https?://#i', $p)) {
+            $item['path'] = $self . '?media=' . rawurlencode(basename($p));
+        }
+    }
+    unset($item);
+    return $playlist;
+}
+
 // --- Locate the shared bot database (read-only use here) --------------------
 if (!defined('SCREENS_DB_PATH')) {
     $cands = [
@@ -95,9 +143,34 @@ $today = $now->format('Y-m-d');
 $playlist = ($screen && ($screen['status'] ?? '') === 'active')
     ? hl_screen_playlist($db, $screen['id'], $today, (int) ($screen['dwell_seconds'] ?? 10))
     : [];
+$playlist = hl_player_public_playlist($playlist);
 
 if ($screen && $db) {
     try { hl_screen_touch($db, $screen['id'], gmdate('Y-m-d H:i:s')); } catch (\Throwable $e) {}
+}
+
+// --- Self-check: /player.php?s=<slug>&diag=1 prints why a screen is/ isn't playing
+if (isset($_GET['diag'])) {
+    header('Content-Type: text/plain; charset=utf-8');
+    header('Cache-Control: no-store, max-age=0');
+    $lines = [];
+    $lines[] = 'HabeshaList screen player - diagnostics';
+    $lines[] = 'db file        : ' . (SCREENS_DB_PATH ?: '(none found)');
+    $lines[] = 'db opened      : ' . ($db ? 'yes' : 'NO');
+    $lines[] = 'slug           : ' . ($slug !== '' ? $slug : '(none in URL - add ?s=<slug>)');
+    $lines[] = 'screen found   : ' . ($screen ? ('yes - "' . ($screen['name'] ?? '') . '"') : 'NO');
+    if ($screen) {
+        $lines[] = 'screen status  : ' . ($screen['status'] ?? '');
+        $lines[] = 'timezone/today : ' . $tz . ' / ' . $today;
+    }
+    $lines[] = 'playlist items : ' . count($playlist);
+    foreach ($playlist as $i => $it) {
+        $lines[] = sprintf('  [%d] type=%s url=%s', $i, $it['type'] ?? '?', $it['path'] ?? '');
+    }
+    $lines[] = 'uploads dir    : ' . $__pl_botroot . '/uploads/screens';
+    $lines[] = 'uploads writable: ' . (is_dir($__pl_botroot . '/uploads/screens') ? (is_writable($__pl_botroot . '/uploads/screens') ? 'yes' : 'exists (not writable)') : 'MISSING');
+    echo implode("\n", $lines) . "\n";
+    exit;
 }
 
 // --- JSON transport the TV polls every 60s (attract-mode playlist) -----------
@@ -324,7 +397,7 @@ $boot = json_encode([
   // Boot
   if (playlist.length) advance(); else { showIdle(true); showHint(interactive); }
   startAttractTimer();
-  setInterval(refresh, 60000);
+  setInterval(refresh, 20000);
 })();
 </script>
 </body>
