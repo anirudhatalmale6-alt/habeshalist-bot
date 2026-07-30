@@ -56,6 +56,16 @@ existing tables. The three new tables are created automatically on first load.
    **Preview** link — that URL is what you open on the physical screen's browser
    (put the browser in kiosk/full-screen mode).
 
+### Putting content on a screen now (house ads)
+Milestone 1 has no advertiser self-booking flow yet (that is Milestone 2). So
+each screen's edit page has a **Content on this screen** panel: upload an image
+or short video (or paste a media URL) and it plays on that screen immediately,
+rotating with any future paid ads. Use it for the venue's own promos, a menu, or
+a welcome slide. Uploaded files are saved next to `player.php` (in
+`uploads/screens/`) and served from the same domain. Until you add at least one
+piece of content, the player correctly shows the branded idle card - that black
+screen with the logo means "connected, nothing booked yet", not an error.
+
 ## How it plays (why it works on this host)
 The TV **pulls** the playlist from us over plain GET requests — nothing has to
 reach *in* to the server, so it runs fine even though inbound webhooks are
