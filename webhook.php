@@ -209,6 +209,13 @@ function handleCallbackQuery($query) {
         if ($data === 'scr_submit')      { scrSubmit($userId, $state); return; }
         if (strpos($data, 'scrapprove_') === 0) { scrModerate($userId, (int) substr($data, 11), 'approve'); return; }
         if (strpos($data, 'scrreject_')  === 0) { scrModerate($userId, (int) substr($data, 10), 'reject'); return; }
+    } elseif (strpos($data, 'scr') === 0) {
+        // The screen-booking menu button is showing, but includes/screen_booking.php
+        // isn't loaded — so these taps would otherwise be silently ignored. Say so.
+        $tg->sendInlineButtons($userId,
+            "This feature isn't finished loading on the server yet. Please try again shortly.",
+            [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+        return;
     }
 
     // ---- Preview + scheduling picker ----
