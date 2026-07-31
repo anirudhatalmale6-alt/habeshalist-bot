@@ -205,10 +205,14 @@ function hl_screen_media_type($path) {
  * at a time; multiple concurrent slots per screen is a phase-2 pricing choice.)
  */
 function hl_screen_is_available(SQLite3 $db, $screenId, $start, $end, $ignoreBookingId = 0) {
+    // House ads (the venue's own perpetual filler content) rotate ALONGSIDE paid
+    // ads and must never block a sale, so they are excluded from occupancy. Only
+    // real advertiser bookings reserve the screen for their dates.
     $st = $db->prepare("
         SELECT COUNT(*) AS n FROM screen_bookings
         WHERE screen_id = :id
           AND id <> :ignore
+          AND COALESCE(payment_ref, '') <> 'house'
           AND status IN ('pending','approved','live')
           AND start_date <= :end AND end_date >= :start");
     $st->bindValue(':id', (int) $screenId, SQLITE3_INTEGER);
