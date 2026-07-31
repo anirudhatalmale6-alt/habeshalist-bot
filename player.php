@@ -205,6 +205,7 @@ if ($wantJson) {
         'ok'       => (bool) $screen,
         'name'     => $screen['name'] ?? null,
         'playlist' => $playlist,
+        'paused'   => $screen ? (($screen['status'] ?? '') === 'paused') : false,
         'ts'       => $today,
     ]);
     exit;
@@ -214,8 +215,13 @@ if ($wantJson) {
 $host         = $_SERVER['HTTP_HOST'] ?? 'habeshalist.com';
 $defaultSite  = 'https://' . $host . '/';
 $interactive  = $screen ? !empty($screen['interactive']) : false;
-$websiteUrl   = $screen ? trim($screen['website_url'] ?? '') : '';
-if ($interactive && $websiteUrl === '') $websiteUrl = $defaultSite;
+// A website URL is always resolvable now (blank -> the site itself) so PAUSE mode
+// can show it full-screen instead of a screensaver.
+$siteUrl      = $screen ? trim($screen['website_url'] ?? '') : '';
+if ($siteUrl === '') $siteUrl = $defaultSite;
+$paused       = $screen ? (($screen['status'] ?? '') === 'paused') : false;
+$kioskLock    = $screen ? !empty($screen['kiosk_lock']) : false;
+$adAudio      = $screen ? !empty($screen['ad_audio']) : false;
 $attractSecs  = $screen ? max(15, (int) ($screen['attract_seconds'] ?? 180)) : 180;
 $idleSecs     = $screen ? max(10, (int) ($screen['idle_return_seconds'] ?? 60)) : 60;
 $portrait     = ($screen['orientation'] ?? 'portrait') === 'portrait';
@@ -226,8 +232,11 @@ $screenName = htmlspecialchars($screen['name'] ?? 'HabeshaList Screen', ENT_QUOT
 $boot = json_encode([
     'slug'        => $slug,
     'playlist'    => $playlist,
-    'interactive' => $interactive && $websiteUrl !== '',
-    'websiteUrl'  => $websiteUrl,
+    'interactive' => $interactive,
+    'websiteUrl'  => $siteUrl,
+    'paused'      => $paused,       // when true: show the website full-screen, no ad loop
+    'kioskLock'   => $kioskLock,    // lock full-screen + block the obvious exits
+    'adAudio'     => $adAudio,      // play video ads with sound when the device allows
     'attractMs'   => $attractSecs * 1000,
     'idleMs'      => $idleSecs * 1000,
 ], JSON_UNESCAPED_SLASHES);
@@ -303,6 +312,7 @@ $boot = json_encode([
 
   var playlist = Array.isArray(BOOT.playlist) ? BOOT.playlist : [];
   var interactive = !!BOOT.interactive;
+  var paused = !!BOOT.paused;       // paused screen: show the website, no ad loop
   var mode = 'ads';                 // 'ads' | 'site'
   var idx = -1, cur = null, adTimer = null, attractTimer = null;
   var idleTimer = null, capTimer = null;
@@ -324,7 +334,10 @@ $boot = json_encode([
     var item = playlist[idx], el;
     if (item.type === 'video'){
       el = document.createElement('video');
-      el.src = item.path; el.muted = true; el.autoplay = true;
+      el.src = item.path;
+      // Play with sound when the screen allows it; browsers that block
+      // autoplay-with-audio fall back to muted so the ad still plays.
+      el.muted = !BOOT.adAudio; el.autoplay = true;
       el.playsInline = true; el.setAttribute('playsinline','');
       el.onended = advance;
       el.onerror = function(){ setTimeout(advance, 500); };
@@ -341,7 +354,12 @@ $boot = json_encode([
       var secs = (item.dwell && item.dwell > 0) ? item.dwell : 10;
       adTimer = setTimeout(advance, secs * 1000);
     } else {
-      var p = el.play(); if (p && p.catch) p.catch(function(){ setTimeout(advance, 500); });
+      var p = el.play();
+      if (p && p.catch) p.catch(function(){
+        // Retry muted once (audio autoplay may be blocked); then skip on failure.
+        if (!el.muted){ el.muted = true; var p2 = el.play(); if (p2 && p2.catch) p2.catch(function(){ setTimeout(advance, 500); }); }
+        else { setTimeout(advance, 500); }
+      });
     }
   }
 
@@ -367,6 +385,7 @@ $boot = json_encode([
 
   // --- return to the passive ad loop ---
   function goAds(){
+    if (paused) return;             // a paused screen stays on the website
     if (mode === 'ads') return;
     mode = 'ads';
     if (idleTimer){ clearTimeout(idleTimer); idleTimer = null; }
@@ -397,30 +416,71 @@ $boot = json_encode([
     };
   }
 
-  // Re-pull the playlist every 60s (only disrupts the loop while in ad mode).
+  // --- PAUSE mode: show the website full-screen instead of a screensaver ---
+  function showPausedSite(){
+    clearAd();
+    if (attractTimer){ clearTimeout(attractTimer); attractTimer = null; }
+    showIdle(false); showHint(false);
+    mode = 'site';
+    frame.src = BOOT.websiteUrl;
+    site.style.display = 'block';
+    bar.style.display = 'none';        // no "back to ads" - the screen is paused
+  }
+
+  // --- Kiosk lock: full-screen + block the obvious ways out (best effort). A
+  // truly tamper-proof lock still needs the DEVICE set to kiosk mode. ---
+  function kioskLock(){
+    if (!BOOT.kioskLock) return;
+    document.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+    document.addEventListener('selectstart', function(e){ e.preventDefault(); });
+    document.addEventListener('dragstart',   function(e){ e.preventDefault(); });
+    document.addEventListener('gesturestart',function(e){ e.preventDefault(); });
+    document.body.style.userSelect = 'none';
+    document.body.style.webkitUserSelect = 'none';
+    document.body.style.touchAction = 'manipulation';
+    window.addEventListener('beforeunload', function(e){ e.preventDefault(); e.returnValue = ''; });
+    var goFs = function(){
+      var el = document.documentElement;
+      if (el.requestFullscreen) { el.requestFullscreen().catch(function(){}); }
+      else if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); }
+      document.removeEventListener('pointerdown', goFs);
+      document.removeEventListener('touchstart', goFs);
+    };
+    document.addEventListener('pointerdown', goFs, {passive:true});
+    document.addEventListener('touchstart', goFs, {passive:true});
+  }
+
+  // Re-pull every 20s: refresh the playlist, and reload if the screen was
+  // paused/unpaused from the admin (so the display switches with no one at the TV).
   function refresh(){
     fetch('player.php?json=1&s=' + encodeURIComponent(BOOT.slug), {cache:'no-store'})
       .then(function(r){ return r.json(); })
       .then(function(d){
-        if (!d || !d.ok || !Array.isArray(d.playlist)) return;
+        if (!d || !d.ok) return;
+        if (!!d.paused !== paused){ location.reload(); return; }
+        if (!Array.isArray(d.playlist)) return;
         var a = JSON.stringify(d.playlist), b = JSON.stringify(playlist);
         if (a !== b){ playlist = d.playlist; if (mode === 'ads'){ idx = -1; clearAd(); advance(); } }
       })
       .catch(function(){});
   }
 
-  // Tap anywhere on the ad loop opens the interactive site immediately.
-  ['pointerdown','touchstart'].forEach(function(ev){
-    document.addEventListener(ev, function(){
-      if (mode === 'ads') goSite(); else resetIdle();
-    }, {passive:true});
-  });
-  document.getElementById('back').addEventListener('click', function(e){ e.stopPropagation(); goAds(); });
-  bar.addEventListener('pointerdown', resetIdle, {passive:true});
-
   // Boot
-  if (playlist.length) advance(); else { showIdle(true); showHint(interactive); }
-  startAttractTimer();
+  kioskLock();
+  if (paused){
+    showPausedSite();
+  } else {
+    // Tap anywhere on the ad loop opens the interactive site immediately.
+    ['pointerdown','touchstart'].forEach(function(ev){
+      document.addEventListener(ev, function(){
+        if (mode === 'ads') goSite(); else resetIdle();
+      }, {passive:true});
+    });
+    document.getElementById('back').addEventListener('click', function(e){ e.stopPropagation(); goAds(); });
+    bar.addEventListener('pointerdown', resetIdle, {passive:true});
+    if (playlist.length) advance(); else { showIdle(true); showHint(interactive); }
+    startAttractTimer();
+  }
   setInterval(refresh, 20000);
 })();
 </script>
