@@ -57,6 +57,9 @@ function hl_screen_upload_dir() {
 function screen_fields_from_post(array $p) {
     return [
         'name'                => $p['name'] ?? '',
+        // Carried through so a legacy screen's location label survives an edit
+        // when City/State are left blank (City, State overrides it when set).
+        'location'            => $p['location'] ?? '',
         'business_name'       => $p['business_name'] ?? '',
         'address'             => $p['address'] ?? '',
         'city'                => $p['city'] ?? '',
@@ -585,7 +588,8 @@ if ($flash) hl_flash($flash, $flashType);
   <form method="post">
     <input type="hidden" name="csrf" value="<?= $csrf ?>">
     <input type="hidden" name="form" value="<?= $editing ? 'edit_screen' : 'add_screen' ?>">
-    <?php if ($editing): ?><input type="hidden" name="id" value="<?= (int) $editing['id'] ?>"><?php endif; ?>
+    <?php if ($editing): ?><input type="hidden" name="id" value="<?= (int) $editing['id'] ?>">
+    <input type="hidden" name="location" value="<?= h($editing['location'] ?? '') ?>"><?php endif; ?>
     <?php $selStyle = 'width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text);font-size:15px';
           $er = $editing ? hl_screen_rate($db, $editing['id']) : null; ?>
     <div class="row">
