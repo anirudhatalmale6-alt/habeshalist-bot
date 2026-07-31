@@ -169,6 +169,30 @@ if (isset($_GET['diag'])) {
     }
     $lines[] = 'uploads dir    : ' . $__pl_botroot . '/uploads/screens';
     $lines[] = 'uploads writable: ' . (is_dir($__pl_botroot . '/uploads/screens') ? (is_writable($__pl_botroot . '/uploads/screens') ? 'yes' : 'exists (not writable)') : 'MISSING');
+
+    // --- Booking availability (why the bot may say "already booked") ----------
+    if ($screen && $db && function_exists('hl_screen_is_available') && function_exists('hl_screen_bookings')) {
+        $t0  = $today;
+        $t30 = date('Y-m-d', strtotime($today . ' +30 day'));
+        $availFix = strpos((string) @file_get_contents(__DIR__ . '/includes/screens.php'), "COALESCE(payment_ref") !== false;
+        $lines[] = '';
+        $lines[] = 'house-ad fix in includes/screens.php : ' . ($availFix ? 'YES (new code on disk)' : 'NO (old file - re-upload it)');
+        $lines[] = 'bookable today (' . $t0 . ')  : ' . (hl_screen_is_available($db, $screen['id'], $t0, $t0) ? 'YES' : 'no - blocked');
+        $lines[] = 'bookable +30d  (' . $t30 . ')  : ' . (hl_screen_is_available($db, $screen['id'], $t30, $t30) ? 'YES' : 'no - blocked');
+        $lines[] = 'bookings on this screen:';
+        $bk = hl_screen_bookings($db, $screen['id']);
+        if (!$bk) $lines[] = '  (none)';
+        foreach ($bk as $b) {
+            $lines[] = sprintf('  #%s  %s / pay=%s / ref=%s  %s -> %s',
+                $b['id'] ?? '?', $b['status'] ?? '?', $b['payment_status'] ?? '?',
+                ($b['payment_ref'] ?? '') === '' ? '(none)' : $b['payment_ref'],
+                $b['start_date'] ?? '?', $b['end_date'] ?? '?');
+        }
+        $lines[] = 'NOTE: the bot loads this file once per ~14-min poll cycle. If the';
+        $lines[] = 'fix shows YES here but the bot still says booked, wait for the next';
+        $lines[] = 'cron cycle (~15 min) for the poller to reload it.';
+    }
+
     echo implode("\n", $lines) . "\n";
     exit;
 }
