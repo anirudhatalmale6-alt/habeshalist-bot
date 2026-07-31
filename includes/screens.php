@@ -35,6 +35,13 @@ const HL_SCREEN_ORIENTATIONS = ['landscape', 'portrait'];
 const HL_SCREEN_IMAGE_EXT    = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
 const HL_SCREEN_VIDEO_EXT    = ['mp4', 'webm', 'mov'];
 
+// Billing periods a screen can be priced in. Each maps to a number of days so a
+// single stored rate+unit prices any run length (see hl_screen_price_for).
+const HL_SCREEN_UNITS      = ['day', 'week', 'month', 'year'];
+const HL_SCREEN_UNIT_DAYS  = ['day' => 1, 'week' => 7, 'month' => 30, 'year' => 365];
+// Default price for a brand-new screen when the admin doesn't type one.
+const HL_SCREEN_DEFAULT_RATE = 5.0;
+
 /**
  * Create the module's tables if they do not exist. Safe to call on every
  * request - it is a no-op once the tables are present.
@@ -46,10 +53,22 @@ function hl_screens_ensure_schema(SQLite3 $db) {
             slug          TEXT UNIQUE NOT NULL,       -- unguessable token in the public URL
             name          TEXT NOT NULL,
             location      TEXT,
+            -- Structured venue address (shown in admin + used for the state-first
+            -- picker in the bot). `location` is kept in sync as \"City, State\" so
+            -- older views keep working without a change.
+            business_name TEXT DEFAULT '',
+            address       TEXT DEFAULT '',
+            city          TEXT DEFAULT '',
+            state         TEXT DEFAULT '',
+            zip           TEXT DEFAULT '',
+            screen_size   TEXT DEFAULT '',            -- e.g. 55\" (informational)
             orientation   TEXT DEFAULT 'portrait',    -- portrait | landscape (pilot is portrait-first)
             resolution    TEXT DEFAULT '1080x1920',   -- informational
             dwell_seconds INTEGER DEFAULT 10,         -- seconds each image shows in the loop
             status        TEXT DEFAULT 'active',      -- active | paused
+            max_ads       INTEGER DEFAULT 0,          -- max concurrent advertiser ads (0 = unlimited)
+            ad_audio      INTEGER DEFAULT 0,          -- 1 = play video ads with sound when the device allows
+            kiosk_lock    INTEGER DEFAULT 1,          -- 1 = lock the player (fullscreen, block exits)
             -- Interactive kiosk mode: the screen periodically switches from the
             -- passive ad loop to a touch-browsable view of the HabeshaList site.
             interactive         INTEGER DEFAULT 1,    -- 1 = enable website mode on this touchscreen
@@ -102,6 +121,16 @@ function hl_screens_migrate(SQLite3 $db) {
         'website_url'         => "TEXT DEFAULT ''",
         'attract_seconds'     => "INTEGER DEFAULT 180",
         'idle_return_seconds' => "INTEGER DEFAULT 60",
+        // Structured address + booking/display options added in the M2 feature pass.
+        'business_name'       => "TEXT DEFAULT ''",
+        'address'             => "TEXT DEFAULT ''",
+        'city'                => "TEXT DEFAULT ''",
+        'state'               => "TEXT DEFAULT ''",
+        'zip'                 => "TEXT DEFAULT ''",
+        'screen_size'         => "TEXT DEFAULT ''",
+        'max_ads'             => "INTEGER DEFAULT 0",
+        'ad_audio'            => "INTEGER DEFAULT 0",
+        'kiosk_lock'          => "INTEGER DEFAULT 1",
     ];
     foreach ($add as $col => $decl) {
         if (empty($have[$col])) $db->exec("ALTER TABLE screens ADD COLUMN {$col} {$decl}");
@@ -200,16 +229,26 @@ function hl_screen_media_type($path) {
 }
 
 /**
- * Is a screen free for the whole [start,end] range? A slot is taken by any
- * pending/approved/live booking that overlaps. (MVP = one advertiser per screen
- * at a time; multiple concurrent slots per screen is a phase-2 pricing choice.)
+ * A screen's booking capacity: how many advertiser ads may run CONCURRENTLY on
+ * it. 0 means unlimited (no cap). House ads never count against this.
  */
-function hl_screen_is_available(SQLite3 $db, $screenId, $start, $end, $ignoreBookingId = 0) {
-    // House ads (the venue's own perpetual filler content) rotate ALONGSIDE paid
-    // ads and must never block a sale, so they are excluded from occupancy. Only
-    // real advertiser bookings reserve the screen for their dates.
+function hl_screen_capacity(SQLite3 $db, $screenId) {
+    $st = $db->prepare("SELECT max_ads FROM screens WHERE id = :id");
+    $st->bindValue(':id', (int) $screenId, SQLITE3_INTEGER);
+    $res = $st->execute();
+    $row = $res ? $res->fetchArray(SQLITE3_ASSOC) : false;
+    return $row ? max(0, (int) $row['max_ads']) : 0;
+}
+
+/**
+ * Per-day count of advertiser bookings that overlap [start,end], keyed by
+ * YYYY-MM-DD. House ads are excluded (they rotate alongside and never occupy a
+ * slot). Only pending/approved/live bookings reserve a slot. This is the shared
+ * primitive behind availability checks AND the calendar's fully-booked marking.
+ */
+function hl_screen_day_counts(SQLite3 $db, $screenId, $start, $end, $ignoreBookingId = 0) {
     $st = $db->prepare("
-        SELECT COUNT(*) AS n FROM screen_bookings
+        SELECT start_date, end_date FROM screen_bookings
         WHERE screen_id = :id
           AND id <> :ignore
           AND COALESCE(payment_ref, '') <> 'house'
@@ -220,27 +259,117 @@ function hl_screen_is_available(SQLite3 $db, $screenId, $start, $end, $ignoreBoo
     $st->bindValue(':start', (string) $start, SQLITE3_TEXT);
     $st->bindValue(':end', (string) $end, SQLITE3_TEXT);
     $res = $st->execute();
-    $row = $res ? $res->fetchArray(SQLITE3_ASSOC) : ['n' => 1];
-    return ((int) ($row['n'] ?? 1)) === 0;
+
+    $counts = [];
+    $rangeStart = strtotime((string) $start);
+    $rangeEnd   = strtotime((string) $end);
+    while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) {
+        $bs = max($rangeStart, strtotime((string) $r['start_date']));
+        $be = min($rangeEnd, strtotime((string) $r['end_date']));
+        for ($t = $bs; $t <= $be; $t += 86400) {
+            $day = date('Y-m-d', $t);
+            $counts[$day] = ($counts[$day] ?? 0) + 1;
+        }
+    }
+    return $counts;
+}
+
+/**
+ * Is a screen free to take ONE MORE ad for the whole [start,end] range? With a
+ * capacity of N, the screen is available only if EVERY day in the range already
+ * has fewer than N advertiser bookings. Capacity 0 = unlimited (always free).
+ */
+function hl_screen_is_available(SQLite3 $db, $screenId, $start, $end, $ignoreBookingId = 0) {
+    $cap = hl_screen_capacity($db, $screenId);
+    if ($cap <= 0) return true;                        // unlimited
+    $counts = hl_screen_day_counts($db, $screenId, $start, $end, $ignoreBookingId);
+    foreach ($counts as $n) {
+        if ((int) $n >= $cap) return false;            // that day is already full
+    }
+    return true;
+}
+
+/**
+ * The set of fully-booked days in [start,end] (date => true), for a capped
+ * screen. Empty when the screen is uncapped or has room every day. Used by the
+ * bot calendar to grey out days that can't take another ad.
+ */
+function hl_screen_full_days(SQLite3 $db, $screenId, $start, $end, $ignoreBookingId = 0) {
+    $cap = hl_screen_capacity($db, $screenId);
+    if ($cap <= 0) return [];
+    $full = [];
+    foreach (hl_screen_day_counts($db, $screenId, $start, $end, $ignoreBookingId) as $day => $n) {
+        if ((int) $n >= $cap) $full[$day] = true;
+    }
+    return $full;
+}
+
+/**
+ * How many advertiser ads are LIVE on a screen today (approved/live + paid,
+ * covering $today, excluding house ads). Powers the admin "Number of Ads" column.
+ */
+function hl_screen_live_count(SQLite3 $db, $screenId, $today) {
+    $st = $db->prepare("
+        SELECT COUNT(*) AS n FROM screen_bookings
+        WHERE screen_id = :id
+          AND COALESCE(payment_ref, '') <> 'house'
+          AND status IN ('approved','live')
+          AND payment_status = 'paid'
+          AND start_date <= :today AND end_date >= :today");
+    $st->bindValue(':id', (int) $screenId, SQLITE3_INTEGER);
+    $st->bindValue(':today', (string) $today, SQLITE3_TEXT);
+    $res = $st->execute();
+    $row = $res ? $res->fetchArray(SQLITE3_ASSOC) : ['n' => 0];
+    return (int) ($row['n'] ?? 0);
+}
+
+/** Is the screen fully booked for TODAY (capacity reached)? For the admin badge. */
+function hl_screen_is_full_today(SQLite3 $db, $screenId, $today) {
+    $cap = hl_screen_capacity($db, $screenId);
+    if ($cap <= 0) return false;
+    return !hl_screen_is_available($db, $screenId, $today, $today);
 }
 
 // ---------------------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------------------
 
+/** Build the legacy `location` label from structured address, falling back to any
+ *  location the caller passed. Keeps older list/bot views working unchanged. */
+function hl_screen_location_label(array $d) {
+    $city  = trim($d['city'] ?? '');
+    $state = trim($d['state'] ?? '');
+    $parts = array_filter([$city, $state], function ($x) { return $x !== ''; });
+    if ($parts) return implode(', ', $parts);
+    return trim($d['location'] ?? '');
+}
+
 function hl_screen_create(SQLite3 $db, array $d) {
     $st = $db->prepare("
-        INSERT INTO screens (slug, name, location, orientation, resolution, dwell_seconds, status,
+        INSERT INTO screens (slug, name, location, business_name, address, city, state, zip,
+                             screen_size, orientation, resolution, dwell_seconds, status,
+                             max_ads, ad_audio, kiosk_lock,
                              interactive, website_url, attract_seconds, idle_return_seconds)
-        VALUES (:slug, :name, :loc, :ori, :res, :dwell, 'active',
+        VALUES (:slug, :name, :loc, :bname, :addr, :city, :state, :zip,
+                :size, :ori, :res, :dwell, 'active',
+                :maxads, :audio, :kiosk,
                 :inter, :wurl, :attract, :idle)");
     $st->bindValue(':slug', hl_screen_new_slug(), SQLITE3_TEXT);
     $st->bindValue(':name', trim($d['name'] ?? ''), SQLITE3_TEXT);
-    $st->bindValue(':loc', trim($d['location'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':loc', hl_screen_location_label($d), SQLITE3_TEXT);
+    $st->bindValue(':bname', trim($d['business_name'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':addr', trim($d['address'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':city', trim($d['city'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':state', trim($d['state'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':zip', trim($d['zip'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':size', trim($d['screen_size'] ?? ''), SQLITE3_TEXT);
     $ori = in_array($d['orientation'] ?? '', HL_SCREEN_ORIENTATIONS, true) ? $d['orientation'] : 'portrait';
     $st->bindValue(':ori', $ori, SQLITE3_TEXT);
     $st->bindValue(':res', trim($d['resolution'] ?? '1080x1920'), SQLITE3_TEXT);
     $st->bindValue(':dwell', max(3, (int) ($d['dwell_seconds'] ?? 10)), SQLITE3_INTEGER);
+    $st->bindValue(':maxads', max(0, (int) ($d['max_ads'] ?? 0)), SQLITE3_INTEGER);
+    $st->bindValue(':audio', !empty($d['ad_audio']) ? 1 : 0, SQLITE3_INTEGER);
+    $st->bindValue(':kiosk', !empty($d['kiosk_lock']) ? 1 : 0, SQLITE3_INTEGER);
     $st->bindValue(':inter', !empty($d['interactive']) ? 1 : 0, SQLITE3_INTEGER);
     $st->bindValue(':wurl', trim($d['website_url'] ?? ''), SQLITE3_TEXT);
     $st->bindValue(':attract', max(15, (int) ($d['attract_seconds'] ?? 180)), SQLITE3_INTEGER);
@@ -252,19 +381,30 @@ function hl_screen_create(SQLite3 $db, array $d) {
 function hl_screen_update(SQLite3 $db, $id, array $d) {
     $st = $db->prepare("
         UPDATE screens
-        SET name = :name, location = :loc, orientation = :ori,
-            resolution = :res, dwell_seconds = :dwell, status = :status,
+        SET name = :name, location = :loc, business_name = :bname, address = :addr,
+            city = :city, state = :state, zip = :zip, screen_size = :size,
+            orientation = :ori, resolution = :res, dwell_seconds = :dwell, status = :status,
+            max_ads = :maxads, ad_audio = :audio, kiosk_lock = :kiosk,
             interactive = :inter, website_url = :wurl,
             attract_seconds = :attract, idle_return_seconds = :idle
         WHERE id = :id");
     $st->bindValue(':name', trim($d['name'] ?? ''), SQLITE3_TEXT);
-    $st->bindValue(':loc', trim($d['location'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':loc', hl_screen_location_label($d), SQLITE3_TEXT);
+    $st->bindValue(':bname', trim($d['business_name'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':addr', trim($d['address'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':city', trim($d['city'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':state', trim($d['state'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':zip', trim($d['zip'] ?? ''), SQLITE3_TEXT);
+    $st->bindValue(':size', trim($d['screen_size'] ?? ''), SQLITE3_TEXT);
     $ori = in_array($d['orientation'] ?? '', HL_SCREEN_ORIENTATIONS, true) ? $d['orientation'] : 'portrait';
     $st->bindValue(':ori', $ori, SQLITE3_TEXT);
     $st->bindValue(':res', trim($d['resolution'] ?? '1080x1920'), SQLITE3_TEXT);
     $st->bindValue(':dwell', max(3, (int) ($d['dwell_seconds'] ?? 10)), SQLITE3_INTEGER);
     $status = in_array($d['status'] ?? '', ['active', 'paused'], true) ? $d['status'] : 'active';
     $st->bindValue(':status', $status, SQLITE3_TEXT);
+    $st->bindValue(':maxads', max(0, (int) ($d['max_ads'] ?? 0)), SQLITE3_INTEGER);
+    $st->bindValue(':audio', !empty($d['ad_audio']) ? 1 : 0, SQLITE3_INTEGER);
+    $st->bindValue(':kiosk', !empty($d['kiosk_lock']) ? 1 : 0, SQLITE3_INTEGER);
     $st->bindValue(':inter', !empty($d['interactive']) ? 1 : 0, SQLITE3_INTEGER);
     $st->bindValue(':wurl', trim($d['website_url'] ?? ''), SQLITE3_TEXT);
     $st->bindValue(':attract', max(15, (int) ($d['attract_seconds'] ?? 180)), SQLITE3_INTEGER);
@@ -275,7 +415,7 @@ function hl_screen_update(SQLite3 $db, $id, array $d) {
 
 /** Set (replace) a screen's own price row, or the global default when screenId is null. */
 function hl_screen_set_rate(SQLite3 $db, $screenId, $rate, $unit = 'day') {
-    $unit = in_array($unit, ['day', 'week'], true) ? $unit : 'day';
+    $unit = in_array($unit, HL_SCREEN_UNITS, true) ? $unit : 'day';
     if ($screenId === null) {
         $db->exec("DELETE FROM screen_pricing WHERE screen_id IS NULL");
         $st = $db->prepare("INSERT INTO screen_pricing (screen_id, rate, unit) VALUES (NULL, :r, :u)");
@@ -449,6 +589,34 @@ function hl_screen_set_booking_status(SQLite3 $db, $bookingId, $status, $payment
     return $db->changes() > 0;
 }
 
+/** Change a booking's scheduled dates (admin edit). Returns true if a row changed. */
+function hl_screen_update_booking_dates(SQLite3 $db, $bookingId, $start, $end) {
+    $st = $db->prepare("UPDATE screen_bookings SET start_date = :s, end_date = :e WHERE id = :id");
+    $st->bindValue(':s', (string) $start, SQLITE3_TEXT);
+    $st->bindValue(':e', (string) $end, SQLITE3_TEXT);
+    $st->bindValue(':id', (int) $bookingId, SQLITE3_INTEGER);
+    $st->execute();
+    return $db->changes() > 0;
+}
+
+/** Replace a booking's media playlist (admin edit). $media = array of ['path','type','dwell']. */
+function hl_screen_set_booking_media(SQLite3 $db, $bookingId, array $media) {
+    $clean = [];
+    foreach ($media as $m) {
+        if (empty($m['path'])) continue;
+        $clean[] = [
+            'path'  => (string) $m['path'],
+            'type'  => in_array(($m['type'] ?? ''), ['image', 'video'], true) ? $m['type'] : hl_screen_media_type($m['path']),
+            'dwell' => (int) ($m['dwell'] ?? 10) ?: 10,
+        ];
+    }
+    $st = $db->prepare("UPDATE screen_bookings SET media = :m WHERE id = :id");
+    $st->bindValue(':m', json_encode(array_values($clean)), SQLITE3_TEXT);
+    $st->bindValue(':id', (int) $bookingId, SQLITE3_INTEGER);
+    $st->execute();
+    return $db->changes() > 0;
+}
+
 /** Bookings awaiting admin approval (status 'pending'), oldest first, with the screen name joined. */
 function hl_screen_pending_bookings(SQLite3 $db) {
     $rows = [];
@@ -473,16 +641,20 @@ function hl_screen_pending_count(SQLite3 $db) {
 }
 
 /**
- * Price for booking a screen for $days days at its effective rate. Day-rate =
- * rate * days; week-rate = rate * whole-or-part weeks. Returns a float (dollars),
- * or null if the screen has no price set yet.
+ * Price for a run of $days days at a screen's stored rate+unit. A screen is
+ * priced per day / week / month / year; the run is billed in whole-or-part units
+ * of that period (e.g. an 8-day run on a weekly rate = 2 weeks). Returns a float
+ * in dollars, or null if the screen has no price set yet.
  */
 function hl_screen_price_for(SQLite3 $db, $screenId, $days) {
     $rate = hl_screen_rate($db, $screenId);
     if (!$rate) return null;
+    return hl_screen_price_calc((float) $rate['rate'], $rate['unit'] ?? 'day', $days);
+}
+
+/** Pure price math for a rate+unit over $days days (no DB) - shared by the bot. */
+function hl_screen_price_calc($rate, $unit, $days) {
     $days = max(1, (int) $days);
-    if (($rate['unit'] ?? 'day') === 'week') {
-        return (float) $rate['rate'] * (int) ceil($days / 7);
-    }
-    return (float) $rate['rate'] * $days;
+    $per  = HL_SCREEN_UNIT_DAYS[$unit] ?? 1;
+    return (float) $rate * (int) ceil($days / $per);
 }

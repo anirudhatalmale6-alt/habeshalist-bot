@@ -53,6 +53,74 @@ function hl_screen_upload_dir() {
     return $dir;
 }
 
+/** Collect the screen add/edit fields from POST into the shape the data layer wants. */
+function screen_fields_from_post(array $p) {
+    return [
+        'name'                => $p['name'] ?? '',
+        'business_name'       => $p['business_name'] ?? '',
+        'address'             => $p['address'] ?? '',
+        'city'                => $p['city'] ?? '',
+        'state'               => $p['state'] ?? '',
+        'zip'                 => $p['zip'] ?? '',
+        'screen_size'         => $p['screen_size'] ?? '',
+        'orientation'         => $p['orientation'] ?? 'portrait',
+        'resolution'          => $p['resolution'] ?? '1080x1920',
+        'dwell_seconds'       => $p['dwell_seconds'] ?? 10,
+        'max_ads'             => $p['max_ads'] ?? 0,
+        'ad_audio'            => isset($p['ad_audio']) ? 1 : 0,
+        'kiosk_lock'          => isset($p['kiosk_lock']) ? 1 : 0,
+        'interactive'         => isset($p['interactive']) ? 1 : 0,
+        'website_url'         => $p['website_url'] ?? '',
+        'attract_seconds'     => $p['attract_seconds'] ?? 180,
+        'idle_return_seconds' => $p['idle_return_seconds'] ?? 60,
+    ];
+}
+
+/**
+ * Store an uploaded media file (or accept a pasted URL) for a screen ad. Returns
+ * ['path'=>rel, 'type'=>'image'|'video'] on success or ['error'=>msg] on failure.
+ * Shared by the house-ad and the booking-media-edit forms.
+ */
+function screen_store_upload($fileKey = 'adfile', $urlKey = 'media_url') {
+    $allowed = array_merge(HL_SCREEN_IMAGE_EXT, HL_SCREEN_VIDEO_EXT);
+    if (!empty($_FILES[$fileKey]['name']) && ($_FILES[$fileKey]['error'] ?? 4) === UPLOAD_ERR_OK) {
+        $ext = strtolower(pathinfo($_FILES[$fileKey]['name'], PATHINFO_EXTENSION));
+        if (!in_array($ext, $allowed, true)) {
+            return ['error' => 'That file type is not supported. Use JPG, PNG, WEBP, GIF or MP4/WEBM/MOV.'];
+        }
+        if (($_FILES[$fileKey]['size'] ?? 0) > 60 * 1024 * 1024) {
+            return ['error' => 'That file is over 60 MB. Please upload a smaller image or a compressed video.'];
+        }
+        $dir = hl_screen_upload_dir();
+        $fname = bin2hex(random_bytes(8)) . '.' . $ext;
+        if (@move_uploaded_file($_FILES[$fileKey]['tmp_name'], $dir . '/' . $fname)) {
+            return ['path' => 'uploads/screens/' . $fname,
+                    'type' => in_array($ext, HL_SCREEN_VIDEO_EXT, true) ? 'video' : 'image'];
+        }
+        return ['error' => 'Could not save the upload. Make sure the bot folder is writable, or paste a media URL instead.'];
+    }
+    if (trim($_POST[$urlKey] ?? '') !== '') {
+        $p = trim($_POST[$urlKey]);
+        return ['path' => $p, 'type' => hl_screen_media_type($p)];
+    }
+    return ['error' => 'Choose a file to upload or paste an image/video URL.'];
+}
+
+/** "just now" / "5 min ago" / "3 hours ago" from a UTC 'Y-m-d H:i:s' heartbeat. */
+function screen_last_seen_human($lastSeen) {
+    $lastSeen = trim((string) $lastSeen);
+    if ($lastSeen === '') return ['never', false];
+    $t = strtotime($lastSeen . ' UTC');
+    if (!$t) return ['unknown', false];
+    $secs = time() - $t;
+    $online = $secs <= 180;                 // player re-pulls ~every 20-60s; 3 min = healthy
+    if ($secs < 60)      $txt = 'just now';
+    elseif ($secs < 3600) $txt = floor($secs / 60) . ' min ago';
+    elseif ($secs < 86400) $txt = floor($secs / 3600) . ' hr ago';
+    else                 $txt = floor($secs / 86400) . ' day(s) ago';
+    return [$txt, $online];
+}
+
 $flash = null; $flashType = 'ok';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -75,41 +143,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $name = trim($_POST['name'] ?? '');
         if ($name === '') { $flash = 'Give the screen a name.'; $flashType = 'err'; }
         else {
-            $id = hl_screen_create($db, [
-                'name'                => $name,
-                'location'            => $_POST['location'] ?? '',
-                'orientation'         => $_POST['orientation'] ?? 'portrait',
-                'resolution'          => $_POST['resolution'] ?? '1080x1920',
-                'dwell_seconds'       => $_POST['dwell_seconds'] ?? 10,
-                'interactive'         => isset($_POST['interactive']) ? 1 : 0,
-                'website_url'         => $_POST['website_url'] ?? '',
-                'attract_seconds'     => $_POST['attract_seconds'] ?? 180,
-                'idle_return_seconds' => $_POST['idle_return_seconds'] ?? 60,
-            ]);
-            if (isset($_POST['rate']) && is_numeric($_POST['rate']) && $_POST['rate'] !== '') {
-                hl_screen_set_rate($db, $id, (float) $_POST['rate'], $_POST['unit'] ?? 'day');
-            }
+            $id = hl_screen_create($db, screen_fields_from_post($_POST));
+            // Every screen carries its own price now; default to $5/day when blank.
+            $rate = (isset($_POST['rate']) && is_numeric($_POST['rate']) && $_POST['rate'] !== '')
+                ? (float) $_POST['rate'] : HL_SCREEN_DEFAULT_RATE;
+            hl_screen_set_rate($db, $id, $rate, $_POST['unit'] ?? 'day');
             $flash = 'Screen added. Point the TV at its player link below.';
         }
 
     } elseif ($form === 'edit_screen') {
         $id = (int) ($_POST['id'] ?? 0);
         if ($id && hl_screen_by_id($db, $id)) {
-            hl_screen_update($db, $id, [
-                'name'                => $_POST['name'] ?? '',
-                'location'            => $_POST['location'] ?? '',
-                'orientation'         => $_POST['orientation'] ?? 'portrait',
-                'resolution'          => $_POST['resolution'] ?? '1080x1920',
-                'dwell_seconds'       => $_POST['dwell_seconds'] ?? 10,
-                'status'              => $_POST['status'] ?? 'active',
-                'interactive'         => isset($_POST['interactive']) ? 1 : 0,
-                'website_url'         => $_POST['website_url'] ?? '',
-                'attract_seconds'     => $_POST['attract_seconds'] ?? 180,
-                'idle_return_seconds' => $_POST['idle_return_seconds'] ?? 60,
-            ]);
-            if (isset($_POST['rate']) && $_POST['rate'] !== '' && is_numeric($_POST['rate'])) {
-                hl_screen_set_rate($db, $id, (float) $_POST['rate'], $_POST['unit'] ?? 'day');
-            }
+            $d = screen_fields_from_post($_POST);
+            $d['status'] = $_POST['status'] ?? 'active';
+            hl_screen_update($db, $id, $d);
+            $rate = (isset($_POST['rate']) && is_numeric($_POST['rate']) && $_POST['rate'] !== '')
+                ? (float) $_POST['rate'] : HL_SCREEN_DEFAULT_RATE;
+            hl_screen_set_rate($db, $id, $rate, $_POST['unit'] ?? 'day');
             $flash = 'Screen updated.';
         }
 
@@ -242,17 +292,90 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
             }
         }
+
+    } elseif ($form === 'edit_booking_dates') {
+        // Admin edits a booking's scheduled dates directly from the panel.
+        $bid = (int) ($_POST['booking_id'] ?? 0);
+        $b = $bid ? hl_screen_booking_by_id($db, $bid) : null;
+        $start = trim($_POST['start_date'] ?? '');
+        $end   = trim($_POST['end_date'] ?? '');
+        $okDate = function ($x) { return preg_match('/^\d{4}-\d{2}-\d{2}$/', $x); };
+        if (!$b) { $flash = 'That booking could not be found.'; $flashType = 'err'; }
+        elseif (!$okDate($start) || !$okDate($end) || $end < $start) {
+            $flash = 'Enter a valid start and end date (end on or after start).'; $flashType = 'err';
+        } else {
+            hl_screen_update_booking_dates($db, $bid, $start, $end);
+            $flash = 'Booking dates updated.';
+        }
+
+    } elseif ($form === 'add_booking_media') {
+        // Admin adds an image/video to an existing booking.
+        $bid = (int) ($_POST['booking_id'] ?? 0);
+        $b = $bid ? hl_screen_booking_by_id($db, $bid) : null;
+        if (!$b) { $flash = 'That booking could not be found.'; $flashType = 'err'; }
+        else {
+            $up = screen_store_upload();
+            if (isset($up['error'])) { $flash = $up['error']; $flashType = 'err'; }
+            else {
+                $media = json_decode((string) $b['media'], true) ?: [];
+                $dwell = max(3, (int) ($_POST['dwell'] ?? 10));
+                $media[] = ['path' => $up['path'], 'type' => $up['type'], 'dwell' => $dwell];
+                hl_screen_set_booking_media($db, $bid, $media);
+                $flash = 'Media added to the booking.';
+            }
+        }
+
+    } elseif ($form === 'del_booking_media') {
+        // Admin removes one media item (by index) from a booking.
+        $bid = (int) ($_POST['booking_id'] ?? 0);
+        $idx = (int) ($_POST['idx'] ?? -1);
+        $b = $bid ? hl_screen_booking_by_id($db, $bid) : null;
+        if (!$b) { $flash = 'That booking could not be found.'; $flashType = 'err'; }
+        else {
+            $media = json_decode((string) $b['media'], true) ?: [];
+            if (isset($media[$idx])) {
+                $gone = $media[$idx];
+                array_splice($media, $idx, 1);
+                hl_screen_set_booking_media($db, $bid, $media);
+                // Clean up the local file if nothing else references it.
+                $p = (string) ($gone['path'] ?? '');
+                if (strpos($p, 'uploads/screens/') === 0) {
+                    $stillUsed = false;
+                    foreach ($media as $m) { if (($m['path'] ?? '') === $p) { $stillUsed = true; break; } }
+                    if (!$stillUsed) { $abs = $__bot_root . '/' . $p; if (is_file($abs)) @unlink($abs); }
+                }
+                $flash = 'Media removed from the booking.';
+            } else { $flash = 'That media item no longer exists.'; $flashType = 'err'; }
+        }
     }
 }
 
 $screens   = hl_screens_all($db);
-$defRate   = hl_screen_rate($db, -1); // -1 has no own row -> returns the global default (or null)
 $playerBase = hl_get_setting('screen_player_url', '');
 $editId    = (int) ($_GET['edit'] ?? 0);
 $editing   = $editId ? hl_screen_by_id($db, $editId) : null;
 $csrf      = h(hl_csrf_token());
 $pendingBookings = function_exists('hl_screen_pending_bookings') ? hl_screen_pending_bookings($db) : [];
 $bookingOn = hl_get_setting('screens_booking_enabled', '1') === '1';
+
+// Booking editor (edit dates + media) opened via ?editbooking=<id>.
+$editBookingId = (int) ($_GET['editbooking'] ?? 0);
+$editBooking   = $editBookingId ? hl_screen_booking_by_id($db, $editBookingId) : null;
+
+// "Today" in the screens timezone, for the live-ad counts + fully-booked badges.
+$screensTz = hl_get_setting('sched_tz', 'America/New_York') ?: 'America/New_York';
+try { $screensToday = (new DateTime('now', new DateTimeZone($screensTz)))->format('Y-m-d'); }
+catch (\Throwable $e) { $screensToday = date('Y-m-d'); }
+
+/** Unit label helper: day/week/month/year -> "/day" style suffix. */
+function screen_unit_options($sel) {
+    $labels = ['day' => 'Day', 'week' => 'Week', 'month' => 'Month', 'year' => 'Year'];
+    $out = '';
+    foreach ($labels as $v => $lab) {
+        $out .= '<option value="' . $v . '"' . ($sel === $v ? ' selected' : '') . '>' . $lab . '</option>';
+    }
+    return $out;
+}
 
 function screen_player_link($base, $slug) {
     $base = trim($base);
@@ -275,6 +398,84 @@ hl_shell_head('Digital Screens', 'screens', hl_pending_count());
 if ($flash) hl_flash($flash, $flashType);
 ?>
 
+<?php if ($editBooking):
+    $ebScreen = hl_screen_by_id($db, $editBooking['screen_id']);
+    $ebMedia  = json_decode((string) $editBooking['media'], true) ?: []; ?>
+<div class="card" style="border:1px solid var(--accent, #3fb950)">
+  <div class="hd"><h2>Edit booking &middot; <?= h($editBooking['business_name'] ?: 'Ad') ?></h2>
+    <a class="btn ghost sm" href="screens.php">Close</a></div>
+  <p class="sub" style="margin:0 0 12px">
+    Screen: <b><?= h($ebScreen['name'] ?? ('#' . $editBooking['screen_id'])) ?></b>
+    &middot; Status: <b><?= h(ucfirst($editBooking['status'])) ?></b>
+    &middot; Ref: <span class="mono small"><?= h($editBooking['payment_ref'] ?: '-') ?></span>
+  </p>
+
+  <h3 style="margin:6px 0">Scheduled dates</h3>
+  <form method="post">
+    <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="edit_booking_dates">
+    <input type="hidden" name="booking_id" value="<?= (int) $editBooking['id'] ?>">
+    <div class="row">
+      <div class="field" style="max-width:190px"><label>Start date</label>
+        <input type="date" name="start_date" value="<?= h($editBooking['start_date']) ?>"></div>
+      <div class="field" style="max-width:190px"><label>End date</label>
+        <input type="date" name="end_date" value="<?= h($editBooking['end_date']) ?>"></div>
+    </div>
+    <button type="submit">Save dates</button>
+  </form>
+
+  <h3 style="margin:20px 0 6px">Ad content</h3>
+  <?php if ($ebMedia): ?>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Preview</th><th>Type</th><th></th></tr></thead>
+    <tbody>
+    <?php foreach ($ebMedia as $i => $mi):
+        $u = screen_media_url($playerBase, $mi['path'] ?? '');
+        $t = $mi['type'] ?? 'image'; ?>
+      <tr>
+        <td>
+          <?php if ($u && $t === 'image'): ?>
+            <a href="#" class="scr-prev" data-media="<?= h(json_encode([['url' => $u, 'type' => 'image']])) ?>"><img src="<?= h($u) ?>" alt="" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block"></a>
+          <?php elseif ($u): ?>
+            <a href="#" class="scr-prev pill mut" data-media="<?= h(json_encode([['url' => $u, 'type' => 'video']])) ?>">&#9654; Video</a>
+          <?php else: ?><span class="muted small">-</span><?php endif; ?>
+        </td>
+        <td><?= h($t) ?></td>
+        <td class="actions">
+          <form method="post" style="display:inline" onsubmit="return confirm('Remove this item from the booking?');">
+            <input type="hidden" name="csrf" value="<?= $csrf ?>">
+            <input type="hidden" name="form" value="del_booking_media">
+            <input type="hidden" name="booking_id" value="<?= (int) $editBooking['id'] ?>">
+            <input type="hidden" name="idx" value="<?= (int) $i ?>">
+            <button class="btn red sm" type="submit"<?= count($ebMedia) <= 1 ? ' disabled title="A booking needs at least one item"' : '' ?>>Remove</button>
+          </form>
+        </td>
+      </tr>
+    <?php endforeach; ?>
+    </tbody>
+  </table></div>
+  <?php else: ?>
+    <div class="empty">No media on this booking.</div>
+  <?php endif; ?>
+
+  <form method="post" enctype="multipart/form-data" style="margin-top:12px">
+    <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="add_booking_media">
+    <input type="hidden" name="booking_id" value="<?= (int) $editBooking['id'] ?>">
+    <div class="row">
+      <div class="field"><label>Add image or video</label>
+        <input type="file" name="adfile" accept="image/*,video/*"
+               style="width:100%;padding:8px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text)"></div>
+      <div class="field"><label>...or paste a media URL</label>
+        <input type="text" name="media_url" placeholder="https://... .jpg / .mp4"></div>
+      <div class="field" style="max-width:150px"><label>Show for (seconds)</label>
+        <input type="number" name="dwell" min="3" value="10"></div>
+    </div>
+    <button type="submit">Add media</button>
+  </form>
+</div>
+<?php endif; ?>
+
 <?php if ($pendingBookings): ?>
 <div class="card" style="border:1px solid var(--accent, #3fb950)">
   <div class="hd"><h2>🔔 Screen bookings awaiting approval (<?= count($pendingBookings) ?>)</h2></div>
@@ -286,21 +487,37 @@ if ($flash) hl_flash($flash, $flashType);
         $item = $b['media_items'][0] ?? null;
         $murl = $item ? screen_media_url($playerBase, $item['path'] ?? '') : '';
         $mtype = $item['type'] ?? 'image';
+        $mediaList = [];
+        foreach (($b['media_items'] ?? []) as $mi) {
+            $u = screen_media_url($playerBase, $mi['path'] ?? '');
+            if ($u !== '') $mediaList[] = ['url' => $u, 'type' => $mi['type'] ?? 'image'];
+        }
+        $mediaAttr = h(json_encode($mediaList));
         $payLabel = $b['payment_status'] === 'paid' ? 'Paid (card)' : ($b['payment_status'] === 'awaiting_verification' ? 'Verify screenshot' : $b['payment_status']); ?>
       <tr>
         <td style="display:flex;align-items:center;gap:10px">
-          <?php if ($murl && $mtype === 'image'): ?>
-            <img src="<?= h($murl) ?>" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:8px;border:1px solid var(--line)">
-          <?php elseif ($murl): ?>
-            <a class="pill mut" href="<?= h($murl) ?>" target="_blank" rel="noopener">Video</a>
+          <?php if ($mediaList): ?>
+            <a href="#" class="scr-prev" data-media="<?= $mediaAttr ?>" title="Preview ad" style="flex:0 0 auto">
+              <?php if ($murl && $mtype === 'image'): ?>
+                <img src="<?= h($murl) ?>" alt="" style="width:52px;height:52px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block">
+              <?php else: ?>
+                <span class="pill mut">&#9654; Video</span>
+              <?php endif; ?>
+            </a>
           <?php endif; ?>
-          <span><b><?= h($b['business_name'] ?: 'Ad') ?></b><br><span class="muted small">ref <?= h($b['payment_ref'] ?: '-') ?></span></span>
+          <span><b><?= h($b['business_name'] ?: 'Ad') ?></b>
+            <?php if (count($mediaList) > 1): ?><span class="muted small"> (<?= count($mediaList) ?> items)</span><?php endif; ?>
+            <br><span class="muted small">ref <?= h($b['payment_ref'] ?: '-') ?></span></span>
         </td>
         <td><?= h($b['screen_name'] ?: ('#' . $b['screen_id'])) ?><?php if (!empty($b['screen_location'])): ?><div class="muted small"><?= h($b['screen_location']) ?></div><?php endif; ?></td>
         <td class="mono small"><?= h($b['start_date']) ?> &rarr; <?= h($b['end_date']) ?></td>
         <td><?= h(hl_money((float) $b['price'])) ?></td>
         <td><span class="pill <?= $b['payment_status'] === 'paid' ? 'ok' : 'mut' ?>"><?= h($payLabel) ?></span></td>
         <td class="actions">
+          <?php if ($mediaList): ?>
+            <a class="btn ghost sm scr-prev" href="#" data-media="<?= $mediaAttr ?>">Preview</a>
+          <?php endif; ?>
+          <a class="btn ghost sm" href="screens.php?editbooking=<?= (int) $b['id'] ?>">Edit</a>
           <form method="post" style="display:inline">
             <input type="hidden" name="csrf" value="<?= $csrf ?>">
             <input type="hidden" name="form" value="approve_booking">
@@ -331,49 +548,21 @@ if ($flash) hl_flash($flash, $flashType);
   </p>
 </div>
 
-<div class="grid2">
-  <div class="card">
-    <div class="hd"><h2>Default price</h2></div>
-    <p class="sub">Used for any screen without its own price. You can override per screen below.</p>
-    <form method="post">
-      <input type="hidden" name="csrf" value="<?= $csrf ?>">
-      <input type="hidden" name="form" value="default_rate">
-      <div class="row">
-        <div class="field" style="max-width:150px">
-          <label>Price</label>
-          <div class="prefix"><span class="sym">$</span>
-            <input type="number" name="rate" min="0" step="0.01"
-                   value="<?= $defRate ? h($defRate['rate']) : '' ?>" placeholder="e.g. 25">
-          </div>
-        </div>
-        <div class="field" style="max-width:130px">
-          <label>Per</label>
-          <select name="unit" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text);font-size:15px">
-            <option value="day"  <?= ($defRate['unit'] ?? 'day') === 'day' ? 'selected' : '' ?>>Day</option>
-            <option value="week" <?= ($defRate['unit'] ?? '') === 'week' ? 'selected' : '' ?>>Week</option>
-          </select>
-        </div>
+<div class="card">
+  <div class="hd"><h2>Player URL base</h2></div>
+  <p class="sub">Where you uploaded player.php (public web address). Each screen link is built from this. Each screen sets its own price below (new screens default to $5/day).</p>
+  <form method="post">
+    <input type="hidden" name="csrf" value="<?= $csrf ?>">
+    <input type="hidden" name="form" value="player_base">
+    <div class="row">
+      <div class="field">
+        <label>Full URL to player.php</label>
+        <input type="text" name="player_base" value="<?= h($playerBase) ?>"
+               placeholder="https://habeshalist.com/bot/player.php">
       </div>
-      <button type="submit">Save default price</button>
-    </form>
-  </div>
-
-  <div class="card">
-    <div class="hd"><h2>Player URL base</h2></div>
-    <p class="sub">Where you uploaded player.php (public web address). Each screen link is built from this.</p>
-    <form method="post">
-      <input type="hidden" name="csrf" value="<?= $csrf ?>">
-      <input type="hidden" name="form" value="player_base">
-      <div class="row">
-        <div class="field">
-          <label>Full URL to player.php</label>
-          <input type="text" name="player_base" value="<?= h($playerBase) ?>"
-                 placeholder="https://habeshalist.com/bot/player.php">
-        </div>
-      </div>
-      <button type="submit">Save</button>
-    </form>
-  </div>
+    </div>
+    <button type="submit">Save</button>
+  </form>
 </div>
 
 <div class="card">
@@ -397,15 +586,48 @@ if ($flash) hl_flash($flash, $flashType);
     <input type="hidden" name="csrf" value="<?= $csrf ?>">
     <input type="hidden" name="form" value="<?= $editing ? 'edit_screen' : 'add_screen' ?>">
     <?php if ($editing): ?><input type="hidden" name="id" value="<?= (int) $editing['id'] ?>"><?php endif; ?>
+    <?php $selStyle = 'width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text);font-size:15px';
+          $er = $editing ? hl_screen_rate($db, $editing['id']) : null; ?>
     <div class="row">
-      <div class="field"><label>Name</label>
+      <div class="field"><label>Screen name</label>
         <input type="text" name="name" value="<?= h($editing['name'] ?? '') ?>" placeholder="e.g. Cafe Lalibela - Main Screen"></div>
-      <div class="field"><label>Location</label>
-        <input type="text" name="location" value="<?= h($editing['location'] ?? '') ?>" placeholder="e.g. Washington DC"></div>
+      <div class="field"><label>Business name</label>
+        <input type="text" name="business_name" value="<?= h($editing['business_name'] ?? '') ?>" placeholder="e.g. Cafe Lalibela"></div>
     </div>
     <div class="row">
+      <div class="field"><label>Address</label>
+        <input type="text" name="address" value="<?= h($editing['address'] ?? '') ?>" placeholder="Street address"></div>
+    </div>
+    <div class="row">
+      <div class="field"><label>City</label>
+        <input type="text" name="city" value="<?= h($editing['city'] ?? '') ?>" placeholder="e.g. Washington"></div>
+      <div class="field" style="max-width:150px"><label>State</label>
+        <input type="text" name="state" value="<?= h($editing['state'] ?? '') ?>" placeholder="e.g. DC"></div>
+      <div class="field" style="max-width:150px"><label>ZIP code</label>
+        <input type="text" name="zip" value="<?= h($editing['zip'] ?? '') ?>" placeholder="e.g. 20001"></div>
+      <div class="field" style="max-width:150px"><label>Screen size</label>
+        <input type="text" name="screen_size" value="<?= h($editing['screen_size'] ?? '') ?>" placeholder='e.g. 55"'></div>
+    </div>
+    <div class="row">
+      <div class="field" style="max-width:150px"><label>Default price</label>
+        <div class="prefix"><span class="sym">$</span>
+          <input type="number" name="rate" min="0" step="0.01" value="<?= $er ? h($er['rate']) : ($editing ? '' : '5') ?>" placeholder="5"></div></div>
+      <div class="field" style="max-width:130px"><label>Per</label>
+        <select name="unit" style="<?= $selStyle ?>"><?= screen_unit_options($er['unit'] ?? 'day') ?></select></div>
+      <div class="field" style="max-width:170px"><label>Max ads (0 = no limit)</label>
+        <input type="number" name="max_ads" min="0" value="<?= h($editing['max_ads'] ?? 0) ?>"></div>
+      <?php if ($editing): ?>
+      <div class="field" style="max-width:150px"><label>Status</label>
+        <select name="status" style="<?= $selStyle ?>">
+          <option value="active" <?= ($editing['status'] ?? 'active') === 'active' ? 'selected' : '' ?>>Active</option>
+          <option value="paused" <?= ($editing['status'] ?? '') === 'paused' ? 'selected' : '' ?>>Paused</option>
+        </select></div>
+      <?php endif; ?>
+    </div>
+    <div class="muted small" style="margin:-4px 0 4px">When Max ads is set, the screen shows <b>Fully Booked</b> and stops taking bookings for any date that reaches that many ads. 0 means unlimited.</div>
+    <div class="row">
       <div class="field" style="max-width:170px"><label>Orientation</label>
-        <select name="orientation" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text);font-size:15px">
+        <select name="orientation" style="<?= $selStyle ?>">
           <option value="portrait"  <?= ($editing['orientation'] ?? 'portrait') === 'portrait' ? 'selected' : '' ?>>Portrait</option>
           <option value="landscape" <?= ($editing['orientation'] ?? '') === 'landscape' ? 'selected' : '' ?>>Landscape</option>
         </select></div>
@@ -414,23 +636,27 @@ if ($flash) hl_flash($flash, $flashType);
       <div class="field" style="max-width:150px"><label>Image seconds</label>
         <input type="number" name="dwell_seconds" min="3" value="<?= h($editing['dwell_seconds'] ?? 10) ?>"></div>
     </div>
-    <div class="row">
-      <div class="field" style="max-width:150px"><label>Price (optional)</label>
-        <div class="prefix"><span class="sym">$</span>
-          <?php $er = $editing ? hl_screen_rate($db, $editing['id']) : null; ?>
-          <input type="number" name="rate" min="0" step="0.01" value="<?= $er ? h($er['rate']) : '' ?>" placeholder="uses default"></div></div>
-      <div class="field" style="max-width:130px"><label>Per</label>
-        <select name="unit" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text);font-size:15px">
-          <option value="day"  <?= ($er['unit'] ?? 'day') === 'day' ? 'selected' : '' ?>>Day</option>
-          <option value="week" <?= ($er['unit'] ?? '') === 'week' ? 'selected' : '' ?>>Week</option>
-        </select></div>
-      <?php if ($editing): ?>
-      <div class="field" style="max-width:150px"><label>Status</label>
-        <select name="status" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:9px;background:var(--input);color:var(--text);font-size:15px">
-          <option value="active" <?= ($editing['status'] ?? 'active') === 'active' ? 'selected' : '' ?>>Active</option>
-          <option value="paused" <?= ($editing['status'] ?? '') === 'paused' ? 'selected' : '' ?>>Paused</option>
-        </select></div>
-      <?php endif; ?>
+
+    <div style="margin:18px 0 6px;padding-top:14px;border-top:1px solid var(--line)">
+      <label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:600">
+        <input type="checkbox" name="kiosk_lock" value="1" style="width:17px;height:17px"
+          <?= (!$editing || !empty($editing['kiosk_lock'])) ? 'checked' : '' ?>>
+        Lock the screen (kiosk mode)
+      </label>
+      <div class="muted small" style="margin:4px 0 8px 26px">
+        Runs the player full-screen and blocks the obvious ways out (right-click, text
+        select, pinch-zoom). A true tamper-proof lock also needs the device set to kiosk
+        mode - see the Kiosk setup guide.
+      </div>
+      <label style="display:flex;align-items:center;gap:9px;cursor:pointer;font-weight:600">
+        <input type="checkbox" name="ad_audio" value="1" style="width:17px;height:17px"
+          <?= (!empty($editing['ad_audio'])) ? 'checked' : '' ?>>
+        Play video ads with sound
+      </label>
+      <div class="muted small" style="margin:4px 0 0 26px">
+        Video ads try to play with audio when the device allows it (kiosks usually do).
+        If the browser blocks autoplay-with-sound, it falls back to muted automatically.
+      </div>
     </div>
 
     <div style="margin:18px 0 6px;padding-top:14px;border-top:1px solid var(--line)">
@@ -440,9 +666,10 @@ if ($flash) hl_flash($flash, $flashType);
         Interactive touchscreen mode
       </label>
       <div class="muted small" style="margin:4px 0 0 26px">
-        The screen runs the ad loop, then periodically opens the HabeshaList website
-        so visitors can tap to browse posts, events and videos with sound. It returns
-        to the ads on its own after a period of no touching.
+        The screen runs the ad loop, then periodically opens the website so visitors can
+        tap to browse posts, events and videos with sound. It returns to the ads on its
+        own after a period of no touching. <b>When the screen is Paused, it shows this
+        website full-screen instead of a screensaver.</b>
       </div>
     </div>
     <div class="row">
@@ -546,18 +773,29 @@ if ($flash) hl_flash($flash, $flashType);
     <div class="empty">No screens yet. Add your first one above.</div>
   <?php else: ?>
   <div class="tblwrap"><table>
-    <thead><tr><th>Screen</th><th>Price</th><th>Status</th><th>Player link</th><th></th></tr></thead>
+    <thead><tr><th>Store</th><th>Price</th><th>Status</th><th>Ads</th><th>State</th><th>Last heartbeat</th><th>Player link</th><th></th></tr></thead>
     <tbody>
     <?php foreach ($screens as $s):
         $rate = hl_screen_rate($db, $s['id']);
-        $link = screen_player_link($playerBase, $s['slug']); ?>
+        $link = screen_player_link($playerBase, $s['slug']);
+        $liveCount = hl_screen_live_count($db, $s['id'], $screensToday);
+        $cap = (int) ($s['max_ads'] ?? 0);
+        $isFull = $cap > 0 && hl_screen_is_full_today($db, $s['id'], $screensToday);
+        [$seenTxt, $seenOnline] = screen_last_seen_human($s['last_seen'] ?? ''); ?>
       <tr>
         <td>
-          <b><?= h($s['name']) ?></b>
-          <div class="muted small"><?= h($s['location'] ?: '-') ?> &middot; <?= h(ucfirst($s['orientation'])) ?> &middot; <?= h($s['resolution']) ?></div>
+          <b><?= h($s['business_name'] ?: $s['name']) ?></b>
+          <div class="muted small"><?= h($s['name']) ?> &middot; <?= h(ucfirst($s['orientation'])) ?><?= !empty($s['screen_size']) ? ' &middot; ' . h($s['screen_size']) : '' ?></div>
         </td>
-        <td><?= $rate ? h(hl_money($rate['rate'])) . '<span class="muted small">/' . h($rate['unit']) . '</span>' : '<span class="muted">default</span>' ?></td>
-        <td><?php if ($s['status'] === 'active'): ?><span class="pill ok">Active</span><?php else: ?><span class="pill mut">Paused</span><?php endif; ?></td>
+        <td><?= $rate ? h(hl_money($rate['rate'])) . '<span class="muted small">/' . h($rate['unit']) . '</span>' : '<span class="muted">-</span>' ?></td>
+        <td>
+          <?php if ($s['status'] !== 'active'): ?><span class="pill mut">Paused</span>
+          <?php elseif ($isFull): ?><span class="pill" style="background:#8957e5;color:#fff">Fully booked</span>
+          <?php else: ?><span class="pill ok">Active</span><?php endif; ?>
+        </td>
+        <td><?= (int) $liveCount ?><?= $cap > 0 ? '<span class="muted small">/' . $cap . '</span>' : '' ?></td>
+        <td><?= h($s['state'] ?: '-') ?></td>
+        <td><span class="pill <?= $seenOnline ? 'ok' : 'mut' ?>" title="<?= h($s['last_seen'] ?? '') ?> UTC"><?= h($seenTxt) ?></span></td>
         <td>
           <?php if ($link): ?>
             <a class="mono small" href="<?= h($link) ?>" target="_blank" rel="noopener"><?= h($s['slug']) ?></a>
@@ -588,5 +826,74 @@ if ($flash) hl_flash($flash, $flashType);
   </table></div>
   <?php endif; ?>
 </div>
+
+<div class="card">
+  <div class="hd"><h2>Kiosk setup guide (lock the screen)</h2></div>
+  <p class="sub" style="margin:0 0 8px">Turning on "Lock the screen" makes the player run full-screen and blocks right-click, text-selection and pinch-zoom. To make a screen truly tamper-proof so nobody can exit to the device, set the device itself to kiosk mode:</p>
+  <details>
+    <summary style="cursor:pointer;font-weight:600">Android TV / tablet / TV box</summary>
+    <div class="muted small" style="margin:8px 0 0">
+      Install a kiosk browser app (e.g. "Fully Kiosk Browser" or "WebView Kiosk"), set the Start URL to this screen's player link, and enable "Kiosk mode / Lock task". Turn on "Launch on boot" so it recovers after a power cut. This stops viewers leaving the ad app.
+    </div>
+  </details>
+  <details style="margin-top:8px">
+    <summary style="cursor:pointer;font-weight:600">Windows / mini-PC</summary>
+    <div class="muted small" style="margin:8px 0 0">
+      Use "Assigned Access" (Settings &rarr; Accounts &rarr; Other users &rarr; Set up a kiosk) with Microsoft Edge in kiosk/full-screen mode pointed at the player link. Or launch Chrome with <span class="mono">--kiosk --incognito</span> and the player URL.
+    </div>
+  </details>
+  <details style="margin-top:8px">
+    <summary style="cursor:pointer;font-weight:600">Video sound on the screens</summary>
+    <div class="muted small" style="margin:8px 0 0">
+      Turn on "Play video ads with sound" per screen above. Kiosk browsers allow autoplay-with-audio out of the box. On desktop Chrome, launch with <span class="mono">--autoplay-policy=no-user-gesture-required</span> so ad videos play with sound automatically.
+    </div>
+  </details>
+</div>
+
+<!-- Ad preview lightbox -->
+<div id="scrLightbox" style="display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.85);align-items:center;justify-content:center">
+  <div style="position:relative;max-width:92vw;max-height:88vh;text-align:center">
+    <div id="scrLbBody" style="max-width:92vw;max-height:80vh"></div>
+    <div id="scrLbNav" style="margin-top:10px;color:#fff;font-size:14px"></div>
+    <button id="scrLbClose" style="position:absolute;top:-14px;right:-14px;width:36px;height:36px;border-radius:50%;border:0;background:#fff;color:#111;font-size:20px;cursor:pointer">&times;</button>
+  </div>
+</div>
+<script>
+(function () {
+  var box  = document.getElementById('scrLightbox');
+  var body = document.getElementById('scrLbBody');
+  var nav  = document.getElementById('scrLbNav');
+  var items = [], pos = 0;
+  function render() {
+    if (!items.length) return;
+    var it = items[pos]; body.innerHTML = '';
+    var el;
+    if (it.type === 'video') {
+      el = document.createElement('video');
+      el.src = it.url; el.controls = true; el.autoplay = true; el.style.maxWidth = '92vw'; el.style.maxHeight = '80vh';
+    } else {
+      el = document.createElement('img');
+      el.src = it.url; el.style.maxWidth = '92vw'; el.style.maxHeight = '80vh'; el.style.borderRadius = '10px';
+    }
+    body.appendChild(el);
+    nav.textContent = items.length > 1 ? ('Item ' + (pos + 1) + ' of ' + items.length + '  -  tap to see next') : '';
+  }
+  function open(list) { items = list || []; pos = 0; if (!items.length) return; box.style.display = 'flex'; render(); }
+  function close() { box.style.display = 'none'; body.innerHTML = ''; }
+  document.addEventListener('click', function (e) {
+    var t = e.target.closest ? e.target.closest('.scr-prev') : null;
+    if (t) {
+      e.preventDefault();
+      try { open(JSON.parse(t.getAttribute('data-media') || '[]')); } catch (err) {}
+    }
+  });
+  document.getElementById('scrLbClose').addEventListener('click', function (e) { e.stopPropagation(); close(); });
+  box.addEventListener('click', function (e) {
+    if (e.target === box) { close(); return; }
+    if (items.length > 1 && e.target.tagName !== 'VIDEO') { pos = (pos + 1) % items.length; render(); }
+  });
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
+})();
+</script>
 
 <?php hl_shell_foot();
