@@ -199,8 +199,11 @@ function handleCallbackQuery($query) {
     if (function_exists('scrStart')) {
         if ($data === 'scr_start')  { handleAction($userId, 'screens'); return; }
         if ($data === 'scr_cancel') { scrCancel($userId); return; }
+        if ($data === 'scrnop')     { return; }   // calendar padding / disabled cell
+        if (strpos($data, 'scrstate_')   === 0) { scrPickState($userId, (int) substr($data, 9), $state); return; }
         if (strpos($data, 'scrpick_')    === 0) { scrPickScreen($userId, (int) substr($data, 8), $state); return; }
-        if (strpos($data, 'scrdate_')    === 0) { scrPickDate($userId, substr($data, 8), $state); return; }
+        if (strpos($data, 'scrcal_')     === 0) { scrCalendarNav($userId, substr($data, 7), $state); return; }
+        if (strpos($data, 'scrday_')     === 0) { scrPickDate($userId, substr($data, 7), $state); return; }
         if (strpos($data, 'scrdur_')     === 0) { scrPickDuration($userId, (int) substr($data, 7), $state); return; }
         if (strpos($data, 'scrpay_')     === 0) { scrHandlePayMethod($userId, substr($data, 7), $state); return; }
         if ($data === 'scr_check_card')  { scrCheckCard($userId, $state); return; }

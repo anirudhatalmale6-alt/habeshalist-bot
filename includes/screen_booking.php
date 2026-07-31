@@ -97,9 +97,28 @@ function scr_download_media($fileId, $type) {
     }
 }
 
+// How far ahead a customer can book a start date (matches the promo calendar feel).
+const SCR_BOOK_HORIZON_DAYS = 90;
+
 // ---------------------------------------------------------------------------
-// Step 1 - pick a screen
+// Step 1 - pick a STATE (then the screens in that state)
 // ---------------------------------------------------------------------------
+
+/** Active, bookable screens (helper shared by the state + screen pickers). */
+function scr_active_screens($sdb) {
+    $screens = $sdb ? hl_screens_all($sdb) : [];
+    return array_values(array_filter($screens, function ($s) { return ($s['status'] ?? '') === 'active'; }));
+}
+
+/** Distinct, sorted state list from the active screens (screens with no state
+ *  are grouped under an empty-string key so they are still bookable). */
+function scr_states_of(array $active) {
+    $states = [];
+    foreach ($active as $s) { $states[trim($s['state'] ?? '')] = true; }
+    $keys = array_keys($states);
+    sort($keys, SORT_NATURAL | SORT_FLAG_CASE);
+    return $keys;
+}
 
 function scrStart($userId) {
     global $tg, $db;
@@ -112,8 +131,7 @@ function scrStart($userId) {
     }
 
     $sdb = scr_db();
-    $screens = $sdb ? hl_screens_all($sdb) : [];
-    $active = array_values(array_filter($screens, function ($s) { return ($s['status'] ?? '') === 'active'; }));
+    $active = scr_active_screens($sdb);
 
     if (!$active) {
         $tg->sendInlineButtons($userId,
@@ -123,26 +141,72 @@ function scrStart($userId) {
         return;
     }
 
+    $states = scr_states_of($active);
+    // Only one state (or none are labelled): skip the state step, list screens directly.
+    if (count($states) <= 1) {
+        scrShowScreens($userId, $states[0] ?? '');
+        return;
+    }
+
+    // Show the states; the user picks one, then sees only that state's screens.
+    $db->setState($userId, 'scr_pickstate', ['states' => $states]);
     $buttons = [];
-    foreach ($active as $s) {
-        $rate = hl_screen_rate($sdb, $s['id']);
-        $priceTxt = $rate ? scr_fmt_price($rate['rate']) . '/' . ($rate['unit'] ?? 'day') : 'ask';
-        $loc = trim($s['location'] ?? '');
-        $label = $s['name'] . ($loc !== '' ? " - {$loc}" : '') . " ({$priceTxt})";
-        $buttons[] = [['text' => $label, 'callback_data' => 'scrpick_' . (int) $s['id']]];
+    foreach ($states as $i => $st) {
+        $label = ($st === '') ? "\xF0\x9F\x93\x8D Other locations" : "\xF0\x9F\x93\x8D {$st}";
+        $buttons[] = [['text' => $label, 'callback_data' => 'scrstate_' . $i]];
     }
     $buttons[] = [['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'scr_cancel']];
-
-    $db->setState($userId, 'scr_pick', []);
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\x96\xA5\xEF\xB8\x8F <b>Advertise on a Screen</b>\n\n" .
         "Show your business on our digital screens - people see it on the spot, at real locations in the community.\n\n" .
-        "Pick a screen to advertise on:",
+        "First, choose a <b>state</b>:",
+        $buttons);
+}
+
+/** User tapped a state - list the active screens in it. */
+function scrPickState($userId, $idx, $state) {
+    $states = $state['data']['states'] ?? [];
+    if (!isset($states[$idx])) { scrStart($userId); return; }
+    scrShowScreens($userId, $states[$idx], count($states) > 1);
+}
+
+/** List the active screens in $stateName (empty = the unlabelled group). */
+function scrShowScreens($userId, $stateName, $hadStates = false) {
+    global $tg, $db;
+
+    $sdb = scr_db();
+    $active = scr_active_screens($sdb);
+    $inState = array_values(array_filter($active, function ($s) use ($stateName) {
+        return trim($s['state'] ?? '') === $stateName;
+    }));
+
+    if (!$inState) {
+        $tg->sendInlineButtons($userId, "No screens available there right now. Please pick another.",
+            [[['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Back", 'callback_data' => 'scr_start']]]);
+        return;
+    }
+
+    $buttons = [];
+    foreach ($inState as $s) {
+        $rate = hl_screen_rate($sdb, $s['id']);
+        $priceTxt = $rate ? scr_fmt_price($rate['rate']) . '/' . ($rate['unit'] ?? 'day') : 'ask';
+        $loc = trim($s['city'] ?? '') ?: trim($s['location'] ?? '');
+        $label = $s['name'] . ($loc !== '' ? " - {$loc}" : '') . " ({$priceTxt})";
+        $buttons[] = [['text' => $label, 'callback_data' => 'scrpick_' . (int) $s['id']]];
+    }
+    $buttons[] = $hadStates
+        ? [['text' => "\xE2\xAC\x85\xEF\xB8\x8F States", 'callback_data' => 'scr_start'], ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'scr_cancel']]
+        : [['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'scr_cancel']];
+
+    $db->setState($userId, 'scr_pick', []);
+    $head = ($stateName !== '') ? " in <b>{$stateName}</b>" : '';
+    $tg->sendInlineButtons($userId,
+        "\xF0\x9F\x96\xA5\xEF\xB8\x8F <b>Screens{$head}</b>\n\nPick a screen to advertise on:",
         $buttons);
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 - choose a start date
+// Step 2 - choose a start date (monthly calendar, like Promote My Business)
 // ---------------------------------------------------------------------------
 
 function scrPickScreen($userId, $screenId) {
@@ -174,55 +238,139 @@ function scrPickScreen($userId, $screenId) {
         'screen_id'   => (int) $screenId,
         'screen_name' => $screen['name'] ?? 'Screen',
         'screen_loc'  => $screen['location'] ?? '',
+        'screen_state'=> trim($screen['state'] ?? ''),
         'dwell'       => (int) ($screen['dwell_seconds'] ?? 10),
         'rate'        => (float) $rate['rate'],
         'unit'        => $rate['unit'] ?? 'day',
+        'capacity'    => (int) ($screen['max_ads'] ?? 0),
     ];
     $db->setState($userId, 'scr_pickdate', $data);
+    scrShowCalendar($userId, $data, null);
+}
 
-    // Next 14 days as buttons, in the screen's timezone (so "today" matches the player).
-    try { $now = new DateTime('now', new DateTimeZone(scr_tz())); }
-    catch (\Throwable $e) { $now = new DateTime('now'); }
-    $rows = []; $row = [];
-    for ($i = 0; $i < 14; $i++) {
-        $d = (clone $now)->modify("+{$i} day");
-        $label = ($i === 0 ? 'Today ' : '') . $d->format('D M j');
-        $row[] = ['text' => $label, 'callback_data' => 'scrdate_' . $d->format('Y-m-d')];
-        if (count($row) === 2) { $rows[] = $row; $row = []; }
+/**
+ * Render a month calendar (Mon-first) for the start date, mirroring the proven
+ * Promote My Business picker. Bookable days within the horizon are tappable;
+ * fully-booked days (a capped screen at capacity) are marked and disabled.
+ */
+function scrShowCalendar($userId, $data, $ym) {
+    global $tg;
+
+    $sdb = scr_db();
+    try { $tz = new DateTimeZone(scr_tz()); } catch (\Throwable $e) { $tz = new DateTimeZone('UTC'); }
+    $today = new DateTime('now', $tz); $today->setTime(0, 0);
+    $maxDate = (clone $today)->modify('+' . (SCR_BOOK_HORIZON_DAYS - 1) . ' day');
+
+    // Month being shown (default: current month), clamped to the bookable window.
+    $month = null;
+    if ($ym && preg_match('/^(\d{4})(\d{2})$/', $ym, $m)) {
+        $month = DateTime::createFromFormat('Y-m-d', "{$m[1]}-{$m[2]}-01", $tz);
     }
-    if ($row) $rows[] = $row;
+    if (!($month instanceof DateTime)) { $month = (clone $today); }
+    $month->setTime(0, 0); $month->modify('first day of this month');
+
+    $firstOfMonth = (clone $month);
+    $daysInMonth  = (int) $month->format('t');
+    $lastOfMonth  = (clone $month)->modify('last day of this month');
+    $leadBlanks   = ((int) $firstOfMonth->format('N')) - 1;   // Mon=1..Sun=7
+
+    // Which days this month are fully booked (only meaningful for a capped screen).
+    $full = [];
+    if ($sdb && (int) ($data['capacity'] ?? 0) > 0) {
+        $full = hl_screen_full_days($sdb, (int) $data['screen_id'],
+            $firstOfMonth->format('Y-m-d'), $lastOfMonth->format('Y-m-d'));
+    }
+
+    $rows = [];
+    // Header: ◀  Month Year  ▶
+    $prevMonthLast  = (clone $firstOfMonth)->modify('-1 day');
+    $nextMonthFirst = (clone $lastOfMonth)->modify('+1 day');
+    $hasPrev = ($prevMonthLast >= $today);
+    $hasNext = ($nextMonthFirst <= $maxDate);
     $rows[] = [
-        ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'scr_start'],
+        $hasPrev ? ['text' => "\xE2\x97\x80", 'callback_data' => 'scrcal_' . $prevMonthLast->format('Ym')]
+                 : ['text' => "\xC2\xA0", 'callback_data' => 'scrnop'],
+        ['text' => $month->format('F Y'), 'callback_data' => 'scrnop'],
+        $hasNext ? ['text' => "\xE2\x96\xB6", 'callback_data' => 'scrcal_' . $nextMonthFirst->format('Ym')]
+                 : ['text' => "\xC2\xA0", 'callback_data' => 'scrnop'],
+    ];
+    $rows[] = array_map(function ($w) { return ['text' => $w, 'callback_data' => 'scrnop']; },
+        ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']);
+
+    $row = [];
+    for ($i = 0; $i < $leadBlanks; $i++) { $row[] = ['text' => "\xC2\xA0", 'callback_data' => 'scrnop']; }
+    for ($day = 1; $day <= $daysInMonth; $day++) {
+        $d = DateTime::createFromFormat('Y-m-d', $month->format('Y-m-') . sprintf('%02d', $day), $tz);
+        $d->setTime(0, 0);
+        $ymd = $d->format('Y-m-d');
+        $inWindow = ($d >= $today && $d <= $maxDate);
+        if ($inWindow && empty($full[$ymd])) {
+            $row[] = ['text' => (string) $day, 'callback_data' => 'scrday_' . $d->format('Ymd')];
+        } elseif ($inWindow && !empty($full[$ymd])) {
+            $row[] = ['text' => "\xF0\x9F\x9A\xAB", 'callback_data' => 'scrnop'];   // fully booked
+        } else {
+            $row[] = ['text' => "\xC2\xB7", 'callback_data' => 'scrnop'];           // outside window
+        }
+        if (count($row) === 7) { $rows[] = $row; $row = []; }
+    }
+    if (!empty($row)) {
+        while (count($row) < 7) { $row[] = ['text' => "\xC2\xA0", 'callback_data' => 'scrnop']; }
+        $rows[] = $row;
+    }
+    $rows[] = [
+        ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Screens", 'callback_data' => 'scr_start'],
         ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'scr_cancel'],
     ];
 
-    $priceTxt = scr_fmt_price($rate['rate']) . ' per ' . ($rate['unit'] ?? 'day');
+    $priceTxt = scr_fmt_price((float) $data['rate']) . ' per ' . ($data['unit'] ?? 'day');
+    $capNote  = ((int) ($data['capacity'] ?? 0) > 0)
+        ? "\n\xF0\x9F\x9A\xAB = fully booked that day. \xC2\xB7 = outside the booking window."
+        : "\n\xC2\xB7 = outside the booking window.";
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\x96\xA5\xEF\xB8\x8F <b>{$data['screen_name']}</b>" .
         ($data['screen_loc'] !== '' ? " - {$data['screen_loc']}" : '') . "\n" .
         "Price: <b>{$priceTxt}</b>\n\n" .
-        "\xF0\x9F\x93\x85 When should your ad start?",
+        "\xF0\x9F\x93\x85 <b>Pick the day your ad should start:</b>" . $capNote,
         $rows);
+}
+
+/** ◀/▶ month navigation on the start-date calendar. */
+function scrCalendarNav($userId, $ym, $state) {
+    scrShowCalendar($userId, $state['data'] ?? [], $ym);
 }
 
 // ---------------------------------------------------------------------------
 // Step 3 - choose duration
 // ---------------------------------------------------------------------------
 
-function scrPickDate($userId, $dateStr, $state) {
+function scrPickDate($userId, $ymd, $state) {
     global $tg, $db;
 
-    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateStr)) { scrPickScreen($userId, $state['data']['screen_id'] ?? 0); return; }
+    // The calendar sends a compact Ymd; convert to Y-m-d.
+    if (!preg_match('/^(\d{4})(\d{2})(\d{2})$/', $ymd, $m)) { scrPickScreen($userId, $state['data']['screen_id'] ?? 0); return; }
+    $dateStr = "{$m[1]}-{$m[2]}-{$m[3]}";
     $data = $state['data'];
+
+    // Re-check the chosen start day is still free (a capped screen may have filled).
+    $sdb = scr_db();
+    if ($sdb && !hl_screen_is_available($sdb, (int) ($data['screen_id'] ?? 0), $dateStr, $dateStr)) {
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x93\x86 Sorry, that day just filled up. Please pick another date.",
+            [[['text' => "\xF0\x9F\x93\x85 Choose another date", 'callback_data' => 'scrpick_' . (int) ($data['screen_id'] ?? 0)]],
+             [['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'scr_cancel']]]);
+        return;
+    }
+
     $data['start_date'] = $dateStr;
     $db->setState($userId, 'scr_pickdur', $data);
 
-    $opts = [1 => '1 day', 3 => '3 days', 7 => '1 week', 14 => '2 weeks', 30 => '30 days'];
+    // Durations spanning day / week / month / year, priced at the screen's rate.
+    $opts = [1 => '1 day', 7 => '1 week', 30 => '1 month', 90 => '3 months', 365 => '1 year'];
     $rate = (float) ($data['rate'] ?? 0);
     $unit = $data['unit'] ?? 'day';
     $rows = [];
     foreach ($opts as $days => $label) {
-        $price = ($unit === 'week') ? $rate * (int) ceil($days / 7) : $rate * $days;
+        $price = hl_screen_price_calc($rate, $unit, $days);
         $rows[] = [['text' => "{$label}  -  " . scr_fmt_price($price), 'callback_data' => 'scrdur_' . $days]];
     }
     $rows[] = [
@@ -260,9 +408,7 @@ function scrPickDuration($userId, $days, $state) {
         return;
     }
 
-    $price = ($data['unit'] ?? 'day') === 'week'
-        ? (float) $data['rate'] * (int) ceil($days / 7)
-        : (float) $data['rate'] * $days;
+    $price = hl_screen_price_calc((float) $data['rate'], $data['unit'] ?? 'day', $days);
 
     $data['days']     = $days;
     $data['end_date'] = $end;
