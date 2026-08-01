@@ -86,6 +86,13 @@ function promoStart($userId) {
         $label = $pkg['emoji'] . ' ' . $pkg['name'] . ' - ' . promoFmtPrice(promoPrice($key));
         $buttons[] = [['text' => $label, 'callback_data' => 'promopkg_' . $key]];
     }
+    // Business of the Week and Advertise on a Screen live under this menu too.
+    if (promoPackage('botw')) {
+        $buttons[] = [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'callback_data' => 'botw']];
+    }
+    if (function_exists('scrStart')) {
+        $buttons[] = [['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Advertise on a Screen", 'callback_data' => 'scr_start']];
+    }
     $buttons[] = [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']];
 
     $db->setState($userId, 'promo_pick', []);

@@ -65,6 +65,12 @@ function scr_tz() {
     return $tz ?: 'America/New_York';
 }
 
+/** Today's date (Y-m-d) in the booking timezone. */
+function scr_today() {
+    try { $tz = new DateTimeZone(scr_tz()); } catch (\Throwable $e) { $tz = new DateTimeZone('UTC'); }
+    return (new DateTime('now', $tz))->format('Y-m-d');
+}
+
 /** Deep link back into this bot's chat (Stripe success/cancel return URL). */
 function scr_return_link($payload) {
     global $config;
@@ -186,12 +192,15 @@ function scrShowScreens($userId, $stateName, $hadStates = false) {
         return;
     }
 
+    $today = scr_today();
     $buttons = [];
     foreach ($inState as $s) {
         $rate = hl_screen_rate($sdb, $s['id']);
         $priceTxt = $rate ? scr_fmt_price($rate['rate']) . '/' . ($rate['unit'] ?? 'day') : 'ask';
         $loc = trim($s['city'] ?? '') ?: trim($s['location'] ?? '');
-        $label = $s['name'] . ($loc !== '' ? " - {$loc}" : '') . " ({$priceTxt})";
+        $full = hl_screen_is_full($sdb, (int) $s['id'], $today);
+        $tag = $full ? "  \xF0\x9F\x9A\xAB Fully booked" : " ({$priceTxt})";
+        $label = $s['name'] . ($loc !== '' ? " - {$loc}" : '') . $tag;
         $buttons[] = [['text' => $label, 'callback_data' => 'scrpick_' . (int) $s['id']]];
     }
     $buttons[] = $hadStates
@@ -217,6 +226,18 @@ function scrPickScreen($userId, $screenId) {
     if (!$screen || ($screen['status'] ?? '') !== 'active') {
         $tg->sendInlineButtons($userId, "Sorry, that screen isn't available. Please pick another.",
             [[['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Back to screens", 'callback_data' => 'scr_start']]]);
+        return;
+    }
+
+    // Hard limit: once a screen has reached its max number of ads, no further
+    // bookings are accepted for it (any date) until an existing ad expires.
+    if (hl_screen_is_full($sdb, (int) $screenId, scr_today())) {
+        $tg->sendInlineButtons($userId,
+            "\xF0\x9F\x9A\xAB <b>" . ($screen['name'] ?? 'This screen') . "</b> is fully booked right now.\n\n" .
+            "It's reached its ad limit, so we can't take another booking on it at the moment. " .
+            "Please pick a different screen - or check back once a current ad finishes.",
+            [[['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Back to screens", 'callback_data' => 'scr_start']],
+             [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
         return;
     }
 
@@ -351,38 +372,33 @@ function scrPickDate($userId, $ymd, $state) {
     $dateStr = "{$m[1]}-{$m[2]}-{$m[3]}";
     $data = $state['data'];
 
-    // Re-check the chosen start day is still free (a capped screen may have filled).
+    // The ad runs for exactly the period the admin assigned to this screen
+    // (day / week / month / year). There is no "how long?" question - the
+    // customer simply pays the price the admin configured for that period.
+    $unit = $data['unit'] ?? 'day';
+    $days = max(1, (int) (HL_SCREEN_UNIT_DAYS[$unit] ?? 1));
+    $end  = date('Y-m-d', strtotime($dateStr . ' +' . ($days - 1) . ' day'));
+
+    // Re-check the whole run is still free (a capped screen may have filled).
     $sdb = scr_db();
-    if ($sdb && !hl_screen_is_available($sdb, (int) ($data['screen_id'] ?? 0), $dateStr, $dateStr)) {
+    $screenId = (int) ($data['screen_id'] ?? 0);
+    if ($sdb && (hl_screen_is_full($sdb, $screenId, scr_today())
+                 || !hl_screen_is_available($sdb, $screenId, $dateStr, $end))) {
         $tg->sendInlineButtons($userId,
-            "\xF0\x9F\x93\x86 Sorry, that day just filled up. Please pick another date.",
-            [[['text' => "\xF0\x9F\x93\x85 Choose another date", 'callback_data' => 'scrpick_' . (int) ($data['screen_id'] ?? 0)]],
+            "\xF0\x9F\x93\x86 Sorry, that date just filled up. Please pick another.",
+            [[['text' => "\xF0\x9F\x93\x85 Choose another date", 'callback_data' => 'scrpick_' . $screenId]],
              [['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'scr_cancel']]]);
         return;
     }
 
+    $unitLabels = ['day' => '1 day', 'week' => '1 week', 'month' => '1 month', 'year' => '1 year'];
     $data['start_date'] = $dateStr;
-    $db->setState($userId, 'scr_pickdur', $data);
+    $data['end_date']   = $end;
+    $data['days']       = $days;
+    $data['unit_label'] = $unitLabels[$unit] ?? ('1 ' . $unit);
+    $data['price']      = hl_screen_price_calc((float) ($data['rate'] ?? 0), $unit, $days);
 
-    // Durations spanning day / week / month / year, priced at the screen's rate.
-    $opts = [1 => '1 day', 7 => '1 week', 30 => '1 month', 90 => '3 months', 365 => '1 year'];
-    $rate = (float) ($data['rate'] ?? 0);
-    $unit = $data['unit'] ?? 'day';
-    $rows = [];
-    foreach ($opts as $days => $label) {
-        $price = hl_screen_price_calc($rate, $unit, $days);
-        $rows[] = [['text' => "{$label}  -  " . scr_fmt_price($price), 'callback_data' => 'scrdur_' . $days]];
-    }
-    $rows[] = [
-        ['text' => "\xE2\xAC\x85\xEF\xB8\x8F Back", 'callback_data' => 'scrpick_' . (int) ($data['screen_id'] ?? 0)],
-        ['text' => "\xE2\x9D\x8C Cancel", 'callback_data' => 'scr_cancel'],
-    ];
-
-    $pretty = date('D, M j Y', strtotime($dateStr));
-    $tg->sendInlineButtons($userId,
-        "\xF0\x9F\x93\x85 Start date: <b>{$pretty}</b>\n\n" .
-        "How long should your ad run?",
-        $rows);
+    scrShowPayment($userId, $data);
 }
 
 function scrPickDuration($userId, $days, $state) {
@@ -430,7 +446,7 @@ function scrShowPayment($userId, $data) {
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\xA7\xBE <b>Booking summary</b>\n\n" .
         "Screen: <b>{$data['screen_name']}</b>" . ($data['screen_loc'] !== '' ? " - {$data['screen_loc']}" : '') . "\n" .
-        "Dates: <b>{$startPretty} - {$endPretty}</b> ({$data['days']} day" . ($data['days'] > 1 ? 's' : '') . ")\n" .
+        "Duration: <b>" . ($data['unit_label'] ?? ($data['days'] . ' days')) . "</b>  ({$startPretty} - {$endPretty})\n" .
         "Total: <b>" . scr_fmt_price($data['price']) . "</b>\n\n" .
         "Choose how you'd like to pay:",
         [
@@ -785,7 +801,8 @@ function scrSubmit($userId, $state) {
 
     $sdb = scr_db();
     // Final availability re-check (someone may have booked it while this user filled the form).
-    if ($sdb && !hl_screen_is_available($sdb, $data['screen_id'], $data['start_date'], $data['end_date'])) {
+    if ($sdb && (hl_screen_is_full($sdb, (int) $data['screen_id'], scr_today())
+                 || !hl_screen_is_available($sdb, $data['screen_id'], $data['start_date'], $data['end_date']))) {
         $db->setState($userId, 'idle', []);
         $tg->sendInlineButtons($userId,
             "\xF0\x9F\x93\x86 Sorry - that screen was just booked for those dates by someone else. Please pick different dates. " .

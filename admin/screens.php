@@ -628,7 +628,7 @@ if ($flash) hl_flash($flash, $flashType);
         </select></div>
       <?php endif; ?>
     </div>
-    <div class="muted small" style="margin:-4px 0 4px">When Max ads is set, the screen shows <b>Fully Booked</b> and stops taking bookings for any date that reaches that many ads. 0 means unlimited.</div>
+    <div class="muted small" style="margin:-4px 0 4px">Max ads is the total number of ads this screen can hold. Once that many ads are assigned, the screen is marked <b>Fully Booked</b> and takes no new bookings until an ad expires. 0 means unlimited.</div>
     <div class="row">
       <div class="field" style="max-width:170px"><label>Orientation</label>
         <select name="orientation" style="<?= $selStyle ?>">
@@ -782,9 +782,12 @@ if ($flash) hl_flash($flash, $flashType);
     <?php foreach ($screens as $s):
         $rate = hl_screen_rate($db, $s['id']);
         $link = screen_player_link($playerBase, $s['slug']);
-        $liveCount = hl_screen_live_count($db, $s['id'], $screensToday);
+        // "Ads" = every ad currently assigned to the screen (live now + upcoming
+        // scheduled), not just the ones showing this instant. Fully-booked once
+        // that count reaches the screen's max.
+        $adCount = hl_screen_active_ad_count($db, $s['id'], $screensToday);
         $cap = (int) ($s['max_ads'] ?? 0);
-        $isFull = $cap > 0 && hl_screen_is_full_today($db, $s['id'], $screensToday);
+        $isFull = $cap > 0 && hl_screen_is_full($db, $s['id'], $screensToday);
         [$seenTxt, $seenOnline] = screen_last_seen_human($s['last_seen'] ?? ''); ?>
       <tr>
         <td>
@@ -797,7 +800,7 @@ if ($flash) hl_flash($flash, $flashType);
           <?php elseif ($isFull): ?><span class="pill" style="background:#8957e5;color:#fff">Fully booked</span>
           <?php else: ?><span class="pill ok">Active</span><?php endif; ?>
         </td>
-        <td><?= (int) $liveCount ?><?= $cap > 0 ? '<span class="muted small">/' . $cap . '</span>' : '' ?></td>
+        <td><?= (int) $adCount ?><?= $cap > 0 ? '<span class="muted small">/' . $cap . '</span>' : '' ?></td>
         <td><?= h($s['state'] ?: '-') ?></td>
         <td><span class="pill <?= $seenOnline ? 'ok' : 'mut' ?>" title="<?= h($s['last_seen'] ?? '') ?> UTC"><?= h($seenTxt) ?></span></td>
         <td>

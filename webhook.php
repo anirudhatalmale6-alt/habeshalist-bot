@@ -2061,8 +2061,6 @@ function showMainMenu($userId, $name) {
         [
             [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
-            [['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Advertise on a Screen", 'callback_data' => 'scr_start']],
-            [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'callback_data' => 'botw']],
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
             [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
@@ -2112,8 +2110,6 @@ function sendGroupButtons($chatId) {
         [
             [['text' => "\xF0\x9F\x93\x9D Post to Website (FREE)", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
-            [['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Advertise on a Screen", 'url' => "https://t.me/{$botUsername}?start=screens"]],
-            [['text' => "\xF0\x9F\x8F\x86 Business of the Week", 'url' => "https://t.me/{$botUsername}?start=botw"]],
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'url' => "https://t.me/{$botUsername}?start=contact"]],
         ]

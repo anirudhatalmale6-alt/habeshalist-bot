@@ -330,6 +330,39 @@ function hl_screen_is_full_today(SQLite3 $db, $screenId, $today) {
     return !hl_screen_is_available($db, $screenId, $today, $today);
 }
 
+/**
+ * How many advertiser ads are ASSIGNED to a screen right now: every non-house
+ * booking that is pending/approved/live and hasn't finished yet (end_date is
+ * today or later). This is the true "Number of ads on this screen" the admin
+ * sees - it counts currently-showing AND upcoming scheduled ads, not just the
+ * ones live at this exact moment. Rejected/cancelled/expired ads are excluded.
+ */
+function hl_screen_active_ad_count(SQLite3 $db, $screenId, $today) {
+    $st = $db->prepare("
+        SELECT COUNT(*) AS n FROM screen_bookings
+        WHERE screen_id = :id
+          AND COALESCE(payment_ref, '') <> 'house'
+          AND status IN ('pending','approved','live')
+          AND end_date >= :today");
+    $st->bindValue(':id', (int) $screenId, SQLITE3_INTEGER);
+    $st->bindValue(':today', (string) $today, SQLITE3_TEXT);
+    $res = $st->execute();
+    $row = $res ? $res->fetchArray(SQLITE3_ASSOC) : ['n' => 0];
+    return (int) ($row['n'] ?? 0);
+}
+
+/**
+ * Is the screen at its ad limit? Once the number of assigned ads reaches the
+ * screen's max_ads, NO further bookings are accepted for that screen (any date)
+ * until an existing ad expires. max_ads 0 = unlimited (never full). This is the
+ * hard "Fully Booked" gate for both the admin panel and the bot.
+ */
+function hl_screen_is_full(SQLite3 $db, $screenId, $today) {
+    $cap = hl_screen_capacity($db, $screenId);
+    if ($cap <= 0) return false;
+    return hl_screen_active_ad_count($db, $screenId, $today) >= $cap;
+}
+
 // ---------------------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------------------
