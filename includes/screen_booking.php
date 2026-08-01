@@ -71,6 +71,22 @@ function scr_today() {
     return (new DateTime('now', $tz))->format('Y-m-d');
 }
 
+/**
+ * Public preview link that shows ONE booking exactly as it will look on the
+ * screen: player.php?s=<slug>&ad=<bookingId>. Returns '' if the player base URL
+ * isn't configured yet (admin -> Digital Screens -> Full URL to player.php) so
+ * callers can fall back gracefully. The screen's unguessable slug keeps it safe
+ * to hand a customer.
+ */
+function scr_preview_link($screen, $bookingId) {
+    global $db;
+    $base = trim((string) $db->getSetting('screen_player_url', ''));
+    $slug = trim((string) ($screen['slug'] ?? ''));
+    if ($base === '' || $slug === '' || (int) $bookingId <= 0) return '';
+    $sep = (strpos($base, '?') !== false) ? '&' : '?';
+    return $base . $sep . 's=' . rawurlencode($slug) . '&ad=' . (int) $bookingId;
+}
+
 /** Deep link back into this bot's chat (Stripe success/cancel return URL). */
 function scr_return_link($payload) {
     global $config;
@@ -904,10 +920,16 @@ function scrModerate($adminId, $bookingId, $decision) {
         hl_screen_set_booking_status($sdb, $bookingId, 'approved', 'paid');
         $tg->sendMessage($adminId, "\xE2\x9C\x85 Approved: <b>{$bname}</b> on {$sname}.");
         if ($posterTid) {
-            $tg->sendInlineButtons($posterTid,
-                "\xF0\x9F\x8E\x89 <b>Great news!</b> Your ad for <b>{$bname}</b> has been approved and will show on <b>{$sname}</b> from <b>" .
-                date('M j', strtotime($b['start_date'])) . "</b> to <b>" . date('M j, Y', strtotime($b['end_date'])) . "</b>. Thank you!",
-                [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+            $previewUrl = scr_preview_link($screen, $bookingId);
+            $msg = "\xF0\x9F\x8E\x89 <b>Great news!</b> Your ad for <b>{$bname}</b> has been approved and will show on <b>{$sname}</b> from <b>" .
+                date('M j', strtotime($b['start_date'])) . "</b> to <b>" . date('M j, Y', strtotime($b['end_date'])) . "</b>. Thank you!";
+            $buttons = [];
+            if ($previewUrl !== '') {
+                $msg .= "\n\nTap below to preview exactly how your ad will look on the screen.";
+                $buttons[] = [['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Preview my ad", 'url' => $previewUrl]];
+            }
+            $buttons[] = [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']];
+            $tg->sendInlineButtons($posterTid, $msg, $buttons);
         }
     } else {
         hl_screen_set_booking_status($sdb, $bookingId, 'rejected');

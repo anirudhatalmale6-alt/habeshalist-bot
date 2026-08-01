@@ -140,12 +140,41 @@ try { $now = new DateTime('now', new DateTimeZone($tz)); }
 catch (\Throwable $e) { $now = new DateTime('now'); }
 $today = $now->format('Y-m-d');
 
-$playlist = ($screen && ($screen['status'] ?? '') === 'active')
-    ? hl_screen_playlist($db, $screen['id'], $today, (int) ($screen['dwell_seconds'] ?? 10))
-    : [];
-$playlist = hl_player_public_playlist($playlist);
+// --- Single-ad PREVIEW: player.php?s=<slug>&ad=<bookingId> ------------------
+// Shows ONE booking's media exactly as it will appear on this screen (same
+// portrait framing and rotation), regardless of its status or booked dates. The
+// screen's unguessable slug is the key and the ad must belong to that screen, so
+// the link is safe to hand a customer. This powers the "here's your ad preview"
+// link the customer receives the moment their ad is approved.
+$previewAdId  = isset($_GET['ad']) ? (int) $_GET['ad'] : 0;
+$previewMode  = false;
+$previewName  = '';
+if ($previewAdId && $screen && $db && function_exists('hl_screen_booking_by_id')) {
+    $previewMode = true;
+    $pb = hl_screen_booking_by_id($db, $previewAdId);
+    $pMedia = ($pb && (int) ($pb['screen_id'] ?? 0) === (int) $screen['id'])
+        ? (json_decode((string) $pb['media'], true) ?: [])
+        : [];
+    $previewName = $pb['business_name'] ?? '';
+    $playlist = [];
+    foreach ($pMedia as $m) {
+        if (empty($m['path'])) continue;
+        $playlist[] = [
+            'path'  => (string) $m['path'],
+            'type'  => in_array(($m['type'] ?? ''), ['image', 'video'], true) ? $m['type'] : hl_screen_media_type($m['path']),
+            'dwell' => (int) ($m['dwell'] ?? 10) ?: 10,
+        ];
+    }
+    $playlist = hl_player_public_playlist($playlist);
+} else {
+    $playlist = ($screen && ($screen['status'] ?? '') === 'active')
+        ? hl_screen_playlist($db, $screen['id'], $today, (int) ($screen['dwell_seconds'] ?? 10))
+        : [];
+    $playlist = hl_player_public_playlist($playlist);
+}
 
-if ($screen && $db) {
+// Only the real, unattended TV should register a heartbeat - never a preview.
+if ($screen && $db && !$previewMode) {
     try { hl_screen_touch($db, $screen['id'], gmdate('Y-m-d H:i:s')); } catch (\Throwable $e) {}
 }
 
@@ -214,13 +243,15 @@ if ($wantJson) {
 // --- Kiosk config ------------------------------------------------------------
 $host         = $_SERVER['HTTP_HOST'] ?? 'habeshalist.com';
 $defaultSite  = 'https://' . $host . '/';
-$interactive  = $screen ? !empty($screen['interactive']) : false;
+// In preview mode nothing but the ad should ever show: no tap-to-website, no
+// pause redirect, no kiosk lock. The customer just watches their own ad loop.
+$interactive  = ($screen && !$previewMode) ? !empty($screen['interactive']) : false;
 // A website URL is always resolvable now (blank -> the site itself) so PAUSE mode
 // can show it full-screen instead of a screensaver.
 $siteUrl      = $screen ? trim($screen['website_url'] ?? '') : '';
 if ($siteUrl === '') $siteUrl = $defaultSite;
-$paused       = $screen ? (($screen['status'] ?? '') === 'paused') : false;
-$kioskLock    = $screen ? !empty($screen['kiosk_lock']) : false;
+$paused       = ($screen && !$previewMode) ? (($screen['status'] ?? '') === 'paused') : false;
+$kioskLock    = ($screen && !$previewMode) ? !empty($screen['kiosk_lock']) : false;
 $adAudio      = $screen ? !empty($screen['ad_audio']) : false;
 $attractSecs  = $screen ? max(15, (int) ($screen['attract_seconds'] ?? 180)) : 180;
 $idleSecs     = $screen ? max(10, (int) ($screen['idle_return_seconds'] ?? 60)) : 60;
@@ -239,7 +270,11 @@ $boot = json_encode([
     'adAudio'     => $adAudio,      // play video ads with sound when the device allows
     'attractMs'   => $attractSecs * 1000,
     'idleMs'      => $idleSecs * 1000,
+    'preview'     => $previewMode,  // one-ad preview: loop it, don't poll for the live playlist
 ], JSON_UNESCAPED_SLASHES);
+$previewLabel = $previewMode
+    ? htmlspecialchars(trim($previewName) !== '' ? $previewName : 'Your ad', ENT_QUOTES, 'UTF-8')
+    : '';
 ?>
 <!doctype html>
 <html lang="en">
@@ -282,10 +317,19 @@ $boot = json_encode([
   #bar b{color:#3fb950}
   #bar .back{margin-left:auto;background:#238636;border:0;color:#fff;border-radius:30px;
     padding:1.2vmin 3vmin;font-size:2.4vmin;font-weight:700}
+  /* Preview banner - only shown when a single ad is opened via ?ad= */
+  #pvw{position:fixed;top:0;left:0;right:0;z-index:20;display:flex;align-items:center;
+    justify-content:center;gap:1.2vmin;padding:1.4vmin 2vmin;text-align:center;
+    color:#fff;font-size:2.2vmin;font-weight:700;letter-spacing:.3px;
+    background:linear-gradient(180deg,rgba(0,0,0,.75),rgba(0,0,0,0))}
+  #pvw .tag{background:#238636;border-radius:30px;padding:.8vmin 2.4vmin}
 </style>
 </head>
 <body>
 <div id="stage"></div>
+<?php if ($previewMode): ?>
+<div id="pvw"><span class="tag">&#128064; Preview</span><span>This is how <?= $previewLabel ?> will appear on the screen</span></div>
+<?php endif; ?>
 <div id="idle">
   <div class="logo">Habesha<b>List</b></div>
   <div class="sub"><?= $screenName ?></div>
@@ -312,6 +356,7 @@ $boot = json_encode([
 
   var playlist = Array.isArray(BOOT.playlist) ? BOOT.playlist : [];
   var interactive = !!BOOT.interactive;
+  var preview = !!BOOT.preview;     // single-ad preview: loop this ad only, no polling
   var paused = !!BOOT.paused;       // paused screen: show the website, no ad loop
   var mode = 'ads';                 // 'ads' | 'site'
   var idx = -1, cur = null, adTimer = null, attractTimer = null;
@@ -467,7 +512,15 @@ $boot = json_encode([
 
   // Boot
   kioskLock();
-  if (paused){
+  if (preview){
+    // Just loop this one ad. No tap-to-site, no attract switch, no polling.
+    if (playlist.length){ advance(); }
+    else {
+      showIdle(true);
+      var sub = idle.querySelector('.sub');
+      if (sub) sub.textContent = 'Preview not available';
+    }
+  } else if (paused){
     showPausedSite();
   } else {
     // Tap anywhere on the ad loop opens the interactive site immediately.
@@ -481,7 +534,7 @@ $boot = json_encode([
     if (playlist.length) advance(); else { showIdle(true); showHint(interactive); }
     startAttractTimer();
   }
-  setInterval(refresh, 20000);
+  if (!preview) setInterval(refresh, 20000);
 })();
 </script>
 </body>

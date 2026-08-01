@@ -276,6 +276,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 hl_screen_set_booking_status($db, $bid, 'approved', 'paid');
                 $userText = "\xF0\x9F\x8E\x89 <b>Great news!</b> Your screen ad for <b>" . htmlspecialchars($bname, ENT_QUOTES)
                           . "</b> has been approved. It will show on the screen for your booked dates. Thank you!";
+                // Give the customer a link to preview exactly how their ad will look.
+                $sc = hl_screen_by_id($db, (int) $b['screen_id']);
+                $pvUrl = ($sc && !empty($sc['slug']))
+                    ? screen_player_link(hl_get_setting('screen_player_url', ''), $sc['slug']) : '';
+                if ($pvUrl !== '') {
+                    $pvUrl .= '&ad=' . (int) $bid;
+                    $userText .= "\n\n\xF0\x9F\x96\xA5\xEF\xB8\x8F <a href=\"" . htmlspecialchars($pvUrl, ENT_QUOTES)
+                              . "\">Preview how your ad will appear on the screen</a>";
+                }
                 $flash = 'Approved: ' . $bname . '.';
             } else {
                 hl_screen_set_booking_status($db, $bid, 'rejected');
@@ -297,9 +306,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
 
     } elseif ($form === 'edit_booking_dates') {
-        // Admin edits a booking's scheduled dates directly from the panel.
+        // Admin edits a booking's name + scheduled dates directly from the panel.
         $bid = (int) ($_POST['booking_id'] ?? 0);
         $b = $bid ? hl_screen_booking_by_id($db, $bid) : null;
+        $bname = trim($_POST['business_name'] ?? '');
         $start = trim($_POST['start_date'] ?? '');
         $end   = trim($_POST['end_date'] ?? '');
         $okDate = function ($x) { return preg_match('/^\d{4}-\d{2}-\d{2}$/', $x); };
@@ -308,7 +318,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $flash = 'Enter a valid start and end date (end on or after start).'; $flashType = 'err';
         } else {
             hl_screen_update_booking_dates($db, $bid, $start, $end);
-            $flash = 'Booking dates updated.';
+            $st = $db->prepare("UPDATE screen_bookings SET business_name = :n WHERE id = :id");
+            $st->bindValue(':n', $bname, SQLITE3_TEXT);
+            $st->bindValue(':id', $bid, SQLITE3_INTEGER);
+            $st->execute();
+            $flash = 'Booking details updated.';
         }
 
     } elseif ($form === 'add_booking_media') {
@@ -413,18 +427,29 @@ if ($flash) hl_flash($flash, $flashType);
     &middot; Ref: <span class="mono small"><?= h($editBooking['payment_ref'] ?: '-') ?></span>
   </p>
 
-  <h3 style="margin:6px 0">Scheduled dates</h3>
+  <?php $ebPreview = (!empty($ebScreen['slug']) && $playerBase !== '')
+        ? screen_player_link($playerBase, $ebScreen['slug']) . '&ad=' . (int) $editBooking['id'] : ''; ?>
+  <?php if ($ebPreview): ?>
+    <p class="sub" style="margin:0 0 12px">
+      <a class="btn ghost sm" href="<?= h($ebPreview) ?>" target="_blank" rel="noopener">&#128064; Preview this ad on the screen</a>
+      <span class="muted small">- the same link the customer gets when their ad is approved.</span>
+    </p>
+  <?php endif; ?>
+
+  <h3 style="margin:6px 0">Ad name &amp; scheduled dates</h3>
   <form method="post">
     <input type="hidden" name="csrf" value="<?= $csrf ?>">
     <input type="hidden" name="form" value="edit_booking_dates">
     <input type="hidden" name="booking_id" value="<?= (int) $editBooking['id'] ?>">
+    <div class="field"><label>Business / ad name</label>
+      <input type="text" name="business_name" value="<?= h($editBooking['business_name']) ?>" placeholder="e.g. Selam Cafe"></div>
     <div class="row">
       <div class="field" style="max-width:190px"><label>Start date</label>
         <input type="date" name="start_date" value="<?= h($editBooking['start_date']) ?>"></div>
       <div class="field" style="max-width:190px"><label>End date</label>
         <input type="date" name="end_date" value="<?= h($editBooking['end_date']) ?>"></div>
     </div>
-    <button type="submit">Save dates</button>
+    <button type="submit">Save details</button>
   </form>
 
   <h3 style="margin:20px 0 6px">Ad content</h3>
@@ -750,6 +775,7 @@ if ($flash) hl_flash($flash, $flashType);
           <?php if ($live): ?><span class="pill ok">Live</span><?php else: ?><span class="pill mut"><?= h(ucfirst($b['status'])) ?></span><?php endif; ?>
         </td>
         <td class="actions">
+          <a class="btn ghost sm" href="screens.php?editbooking=<?= (int) $b['id'] ?>">Edit</a>
           <form method="post" style="display:inline" onsubmit="return confirm('Remove this ad from the screen?');">
             <input type="hidden" name="csrf" value="<?= $csrf ?>">
             <input type="hidden" name="form" value="del_ad">
