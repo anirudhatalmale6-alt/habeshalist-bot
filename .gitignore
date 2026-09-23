@@ -5,3 +5,10 @@ data/*
 *.log
 .env
 bridge-config.php
+
+# Uploaded media is user data, not source: transporter profile photos are
+# personal data and screen/house-ad creatives belong to the advertiser. Neither
+# must ever reach this repository. Keep the folder structure, ignore contents.
+uploads/**
+!uploads/**/
+!uploads/**/.htaccess

@@ -614,5 +614,12 @@ echo "\n=====================================================\n";
 echo "  PASS: {$pass}   FAIL: {$fail}\n";
 echo "=====================================================\n";
 
+// Clean up after ourselves: the temp DB and the profile photo the run downloaded
+// into uploads/transporters (otherwise every run leaves another stray file).
 @unlink($dbPath);
+foreach ([$TRID, $TR2, $LOW] as $__cleanId) {
+    $__row = hl_tr_by_id($tdb, $__cleanId);
+    $__p = trim((string) ($__row['photo_path'] ?? ''));
+    if ($__p !== '' && is_file(__DIR__ . '/' . $__p)) @unlink(__DIR__ . '/' . $__p);
+}
 exit($fail > 0 ? 1 : 0);
