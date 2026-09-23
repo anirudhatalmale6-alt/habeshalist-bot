@@ -14,6 +14,10 @@ require_once __DIR__ . '/includes/referral.php';  // Invite & Earn engine
 // optional-at-load so a not-yet-uploaded file can never crash the poller.
 if (is_file(__DIR__ . '/includes/screens.php'))        require_once __DIR__ . '/includes/screens.php';
 if (is_file(__DIR__ . '/includes/screen_booking.php')) require_once __DIR__ . '/includes/screen_booking.php';
+// Verified Transporter (Luggage & Transport): the data layer + the bot flow.
+// Loaded the same optional-at-load way, for the same reason.
+if (is_file(__DIR__ . '/includes/transporters.php')) require_once __DIR__ . '/includes/transporters.php';
+if (is_file(__DIR__ . '/includes/transport.php'))    require_once __DIR__ . '/includes/transport.php';
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
@@ -215,6 +219,59 @@ function handleCallbackQuery($query) {
     } elseif (strpos($data, 'scr') === 0) {
         // The screen-booking menu button is showing, but includes/screen_booking.php
         // isn't loaded — so these taps would otherwise be silently ignored. Say so.
+        $tg->sendInlineButtons($userId,
+            "This feature isn't finished loading on the server yet. Please try again shortly.",
+            [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
+        return;
+    }
+
+    // ---- Luggage & Transport (Verified Transporter) ----
+    if (function_exists('trMenu')) {
+        if ($data === 'tr_menu')   { trMenu($userId); return; }
+        if ($data === 'tr_cancel') { trCancel($userId); return; }
+        if ($data === 'tr_safety') { trSafety($userId); return; }
+
+        // Application
+        if ($data === 'tr_apply')     { handleAction($userId, 'transport_apply'); return; }
+        if ($data === 'tr_apply_go')  { trApplyStart($userId, $query['from'] ?? []); return; }
+        if ($data === 'tr_ap_submit') { trApplySubmit($userId, $state); return; }
+
+        // Public username + profile
+        if ($data === 'tr_uname')   { trPromptUsername($userId); return; }
+        if ($data === 'tr_profile') { trShowProfile($userId); return; }
+
+        // Post Available Space
+        if ($data === 'tr_post')      { handleAction($userId, 'transport_post'); return; }
+        if ($data === 'tr_p_edit')    { trEditMenu($userId, $state); return; }
+        if ($data === 'tr_p_back')    { trShowPreview($userId, $state['data'] ?? []); return; }
+        if (strpos($data, 'tred_') === 0) { trEditField($userId, substr($data, 5), $state); return; }
+        if ($data === 'tr_p_promote') { trShowPayment($userId, $state['data'] ?? []); return; }
+
+        // Payment
+        if (strpos($data, 'trpay_') === 0) { trHandlePayMethod($userId, substr($data, 6), $state); return; }
+        if ($data === 'tr_check_card')  { trCheckCard($userId, $state); return; }
+        if ($data === 'tr_paid_manual') { trManualProceed($userId, $state, null); return; }
+
+        // Find + rate
+        if ($data === 'tr_find') { trFindStart($userId); return; }
+        if ($data === 'tr_rate') { trRateStart($userId); return; }
+        if (strpos($data, 'trstar_') === 0) { trRateStars($userId, (int) substr($data, 7), $state); return; }
+        if ($data === 'tr_r_add_comment') { trRateAskComment($userId, $state); return; }
+        if ($data === 'tr_r_skip')        { trRateDone($userId, $state['data'] ?? []); return; }
+
+        // Admin decisions
+        if (strpos($data, 'trok_')   === 0) { trModerate($userId, (int) substr($data, 5), 'approve'); return; }
+        if (strpos($data, 'trno_')   === 0) { trModerate($userId, (int) substr($data, 5), 'reject'); return; }
+        if (strpos($data, 'truok_')  === 0) { trModerateUsername($userId, (int) substr($data, 6), true); return; }
+        if (strpos($data, 'truno_')  === 0) { trModerateUsername($userId, (int) substr($data, 6), false); return; }
+        if (strpos($data, 'trpok_')  === 0) { trModeratePost($userId, (int) substr($data, 6), true); return; }
+        if (strpos($data, 'trpno_')  === 0) { trModeratePost($userId, (int) substr($data, 6), false); return; }
+        if (strpos($data, 'trkeep_') === 0) { trReviewAction($userId, (int) substr($data, 7), 'keep'); return; }
+        if (strpos($data, 'trwarn_') === 0) { trReviewAction($userId, (int) substr($data, 7), 'warn'); return; }
+        if (strpos($data, 'trsusp_') === 0) { trReviewAction($userId, (int) substr($data, 7), 'suspend'); return; }
+    } elseif (strpos($data, 'tr_') === 0 || strpos($data, 'trpay_') === 0 || strpos($data, 'trstar_') === 0) {
+        // Same guard as the screens module: the menu button is live but
+        // includes/transport.php isn't loaded yet, so say so instead of going silent.
         $tg->sendInlineButtons($userId,
             "This feature isn't finished loading on the server yet. Please try again shortly.",
             [[['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']]]);
@@ -632,6 +689,9 @@ function handleMessage($msg) {
         if (strpos($ps['state'], 'scr_') === 0 && function_exists('scrHandlePhoto')) {
             if (scrHandlePhoto($userId, $msg)) return;
         }
+        if (strpos($ps['state'], 'tr_') === 0 && function_exists('trHandlePhoto')) {
+            if (trHandlePhoto($userId, $msg)) return;
+        }
         if (handlePhotoMessage($userId, $msg)) return;
     }
 
@@ -674,6 +734,12 @@ function handleStateInput($userId, $msg) {
     // Route all screen-booking states to the screen booking module
     if (strpos($state['state'], 'scr_') === 0 && function_exists('scrHandleStateInput')) {
         scrHandleStateInput($userId, $msg, $state);
+        return;
+    }
+
+    // Route all Luggage & Transport states to the transporter module
+    if (strpos($state['state'], 'tr_') === 0 && function_exists('trHandleStateInput')) {
+        trHandleStateInput($userId, $msg, $state);
         return;
     }
 
@@ -1368,6 +1434,27 @@ function handleAction($userId, $action) {
         case 'scrpaycancel':
             if (function_exists('scrReturnFromCancel')) scrReturnFromCancel($userId);
             break;
+        case 'transport':
+            if (!function_exists('trMenu')) { showMainMenu($userId, ($db->getUser($userId)['name'] ?? 'there')); break; }
+            trMenu($userId);
+            break;
+        case 'transport_apply':
+            if (!function_exists('trApplyIntro')) { showMainMenu($userId, ($db->getUser($userId)['name'] ?? 'there')); break; }
+            if (!$db->getUser($userId)) { startRegistration($userId, 'transport_apply'); break; }
+            trApplyIntro($userId);
+            break;
+        case 'transport_post':
+            if (!function_exists('trPostStart')) { showMainMenu($userId, ($db->getUser($userId)['name'] ?? 'there')); break; }
+            if (!$db->getUser($userId)) { startRegistration($userId, 'transport_post'); break; }
+            trPostStart($userId);
+            break;
+        case 'trpaid':
+            // Return from Stripe checkout (success) for a transporter ad.
+            if (function_exists('trReturnFromCheckout')) trReturnFromCheckout($userId);
+            break;
+        case 'trpaycancel':
+            if (function_exists('trReturnFromCancel')) trReturnFromCancel($userId);
+            break;
         case 'contact':
             showContactInfo($userId);
             break;
@@ -2056,11 +2143,13 @@ function showMainMenu($userId, $name) {
         "- Discover jobs\n" .
         "- Buy and Sell\n" .
         "- Promote your business\n" .
+        "- Send luggage with a Verified Transporter\n" .
         "- Connect with the community\n\n" .
         "All in one place. Tap a button below to get started:",
         [
             [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
+            [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'callback_data' => 'tr_menu']],
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
             [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
@@ -2105,11 +2194,13 @@ function sendGroupButtons($chatId) {
         "- Discover jobs\n" .
         "- Buy and Sell\n" .
         "- Promote your business\n" .
+        "- Send luggage with a Verified Transporter\n" .
         "- Connect with the community\n\n" .
         "All in one place. Tap a button below to get started:",
         [
             [['text' => "\xF0\x9F\x93\x9D Post to Website (FREE)", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
+            [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'url' => "https://t.me/{$botUsername}?start=transport"]],
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'url' => "https://t.me/{$botUsername}?start=contact"]],
         ]
