@@ -661,6 +661,21 @@ function handleMessage($msg) {
         return;
     }
 
+    // /links in private chat (admins): the HabeshaList Travel sign-up links, ready
+    // to forward to anyone who asks how to join. Each link is its own message so
+    // it can be long-pressed and forwarded on its own.
+    if ($isPrivate && ($text === '/links' || $text === '/travel')) {
+        if (isAdmin($userId)) {
+            $base = rtrim((string) $db->getSetting('travel_site_url', 'https://travel.habeshalist.com'), '/');
+            $tg->sendMessage($userId, "\xE2\x9C\x88\xEF\xB8\x8F <b>HabeshaList Travel links</b>\nLong-press any message below to forward it.");
+            $tg->sendMessage($userId, "\xF0\x9F\x93\xA6 <b>Send a package</b> - sign up as a sender:\n{$base}/register/sender");
+            $tg->sendMessage($userId, "\xE2\x9C\x88\xEF\xB8\x8F <b>Post a trip</b> - sign up as a traveler:\n{$base}/register/traveler");
+            $tg->sendMessage($userId, "\xF0\x9F\x94\x91 <b>Sign in</b>:\n{$base}/login");
+            $tg->sendMessage($userId, "\xF0\x9F\x94\x8D <b>Find a traveler</b>:\n{$base}/travelers");
+        }
+        return;
+    }
+
     // /menu in private chat
     if ($isPrivate && $text === '/menu') {
         $user = $db->getUser($userId);
