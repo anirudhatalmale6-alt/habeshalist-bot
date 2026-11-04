@@ -2151,6 +2151,10 @@ function callBridge($payload, $timeout = 30) {
 function showMainMenu($userId, $name) {
     global $tg, $config;
 
+    // Luggage & Transport only shows once includes/transport.php is on the server,
+    // so webhook.php can be deployed without that module and the menu is unchanged.
+    $tr = function_exists('trMenu');
+
     $tg->sendInlineButtons($userId,
         "\xF0\x9F\x8F\xA0 <b>Welcome to HabeshaList.com!</b>\n\n" .
         "The Habesha marketplace where you can:\n" .
@@ -2158,17 +2162,17 @@ function showMainMenu($userId, $name) {
         "- Discover jobs\n" .
         "- Buy and Sell\n" .
         "- Promote your business\n" .
-        "- Send luggage with a Verified Transporter\n" .
+        ($tr ? "- Send luggage with a Verified Transporter\n" : '') .
         "- Connect with the community\n\n" .
         "All in one place. Tap a button below to get started:",
-        [
+        array_values(array_filter([
             [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
-            [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'callback_data' => 'tr_menu']],
+            $tr ? [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'callback_data' => 'tr_menu']] : null,
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
             [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
-        ]
+        ]))
     );
 }
 
@@ -2201,6 +2205,7 @@ function sendGroupButtons($chatId) {
     global $tg;
 
     $botUsername = getBotUsername();
+    $tr = function_exists('trMenu');   // see showMainMenu()
 
     $tg->sendInlineButtons($chatId,
         "\xF0\x9F\x8C\x9F <b>Welcome to HabeshaList.com</b> \xF0\x9F\x8C\x9F\n\n" .
@@ -2209,16 +2214,16 @@ function sendGroupButtons($chatId) {
         "- Discover jobs\n" .
         "- Buy and Sell\n" .
         "- Promote your business\n" .
-        "- Send luggage with a Verified Transporter\n" .
+        ($tr ? "- Send luggage with a Verified Transporter\n" : '') .
         "- Connect with the community\n\n" .
         "All in one place. Tap a button below to get started:",
-        [
+        array_values(array_filter([
             [['text' => "\xF0\x9F\x93\x9D Post to Website (FREE)", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
-            [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'url' => "https://t.me/{$botUsername}?start=transport"]],
+            $tr ? [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'url' => "https://t.me/{$botUsername}?start=transport"]] : null,
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],
             [['text' => "\xF0\x9F\x93\x9E Contact Us", 'url' => "https://t.me/{$botUsername}?start=contact"]],
-        ]
+        ]))
     );
 }
 
