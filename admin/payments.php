@@ -11,6 +11,14 @@ $res = hl_db()->query("SELECT business_name, package_key, price, payment_method,
                        FROM promotions WHERE price IS NOT NULL AND price>0 ORDER BY id DESC LIMIT 300");
 while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $rows[] = $r; }
 
+// Listing fees (paid posting through the bot), if that module has run at least once.
+$lfRows = []; $lfTotal = 0.0;
+if (hl_count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='listing_payments'") > 0) {
+    $res = hl_db()->query("SELECT lp.*, u.name AS user_name FROM listing_payments lp LEFT JOIN users u ON u.telegram_id = lp.telegram_id
+                           WHERE lp.status IN ('paid', 'published') ORDER BY lp.id DESC LIMIT 300");
+    while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) { $lfRows[] = $r; $lfTotal += (float) $r['amount']; }
+}
+
 $total = 0.0;
 foreach ($rows as $r) { if (in_array($r['status'], ['approved'], true)) $total += (float) $r['price']; }
 
@@ -41,6 +49,30 @@ hl_shell_head('Payments', 'payments', hl_pending_count());
         <td class="muted"><?= h($p['payment_method'] ? ucfirst($p['payment_method']) : '-') ?></td>
         <td class="muted small"><?= h($p['created_at']) ?></td>
         <td><span class="pill <?= $pc ?>"><?= h($pl) ?></span></td>
+      </tr>
+    <?php endforeach; ?>
+    </tbody>
+  </table></div>
+  <?php endif; ?>
+</div>
+
+<div class="card" data-listing-payments>
+  <div class="hd"><h2>Listing fees</h2><span class="muted small">Total <?= h(hl_money($lfTotal)) ?></span></div>
+  <p class="sub">Posting fees paid by card for ads posted through the bot. Only confirmed Stripe payments are listed.</p>
+  <?php if (!$lfRows): ?>
+    <div class="empty">No listing fees yet.</div>
+  <?php else: ?>
+  <div class="tblwrap"><table>
+    <thead><tr><th>Ad</th><th>Category</th><th>Posted by</th><th>Amount</th><th>Paid</th><th>Status</th></tr></thead>
+    <tbody>
+    <?php foreach ($lfRows as $p): ?>
+      <tr>
+        <td><?= h($p['title'] ?: '-') ?><?php if ($p['osclass_id']): ?> <span class="muted small">#<?= h($p['osclass_id']) ?></span><?php endif; ?></td>
+        <td class="muted small"><?= h($p['category_label']) ?></td>
+        <td><?= h($p['user_name'] ?: (string) $p['telegram_id']) ?></td>
+        <td><b><?= h(hl_money($p['amount'])) ?></b><div class="muted small mono"><?= h($p['payment_ref'] ?: '') ?></div></td>
+        <td class="muted small"><?= h($p['paid_at']) ?></td>
+        <td><?= $p['status'] === 'published' ? '<span class="pill ok">Published</span>' : '<span class="pill pend">Paid, not published yet</span>' ?></td>
       </tr>
     <?php endforeach; ?>
     </tbody>

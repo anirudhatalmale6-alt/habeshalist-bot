@@ -124,6 +124,7 @@ function hl_nav_items() {
         ]],
         ['sec' => 'Settings', 'items' => [
             ['slug' => 'pricing',    'label' => 'Plan & Pricing',  'href' => 'pricing.php',    'icon' => "\xF0\x9F\x8F\xB7\xEF\xB8\x8F"],
+            ['slug' => 'listingfees','label' => 'Listing Fees',    'href' => 'listing-fees.php','icon' => "\xF0\x9F\x92\xB5"],
             ['slug' => 'methods',    'label' => 'Payment Methods', 'href' => 'methods.php',    'icon' => "\xF0\x9F\x92\xB0"],
             ['slug' => 'schedule',   'label' => 'Schedule Settings','href' => 'settings.php',  'icon' => "\xE2\x9A\x99\xEF\xB8\x8F"],
             ['slug' => 'keys',       'label' => 'Keys',            'href' => 'secrets.php',    'icon' => "\xF0\x9F\x94\x91"],

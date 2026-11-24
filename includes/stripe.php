@@ -45,6 +45,12 @@ function hl_stripe_get_session($key, $sessionId) {
     return $res;
 }
 
+// Close an unpaid Checkout Session so it can no longer be paid. True on success.
+function hl_stripe_expire_session($key, $sessionId) {
+    $res = hl_stripe_request($key, 'POST', 'https://api.stripe.com/v1/checkout/sessions/' . urlencode($sessionId) . '/expire', []);
+    return is_array($res) && empty($res['error']) && (($res['status'] ?? '') === 'expired');
+}
+
 // True if a retrieved session has been paid.
 function hl_stripe_session_paid($session) {
     return is_array($session) && (($session['payment_status'] ?? '') === 'paid');

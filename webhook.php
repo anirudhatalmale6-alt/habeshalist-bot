@@ -18,10 +18,14 @@ if (is_file(__DIR__ . '/includes/screen_booking.php')) require_once __DIR__ . '/
 // Loaded the same optional-at-load way, for the same reason.
 if (is_file(__DIR__ . '/includes/transporters.php')) require_once __DIR__ . '/includes/transporters.php';
 if (is_file(__DIR__ . '/includes/transport.php'))    require_once __DIR__ . '/includes/transport.php';
+// Paid posting for classified ads (optional: without it, posting stays free).
+if (is_file(__DIR__ . '/includes/listing_fees.php')) require_once __DIR__ . '/includes/listing_fees.php';
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
 if (!isset($tg)) $tg = new Telegram($config['bot_token']);
+// Paid posting: share the category list with the admin panel's Listing Fees page.
+if (function_exists('lf_sync_categories')) lf_sync_categories();
 // Invite & Earn engine (own SQLite handle to the same db, like HL_Scheduler).
 if (!isset($referral)) { try { $referral = new HL_Referral($db->path()); } catch (\Throwable $e) { $referral = null; } }
 
@@ -109,6 +113,9 @@ function handleCallbackQuery($query) {
     if ($msgId) {
         $tg->editMessageReplyMarkup($chatId, $msgId);
     }
+
+    // ---- Listing fee (paid posting) buttons ----
+    if (strpos($data, 'lf_') === 0 && function_exists('lfHandleCallback') && lfHandleCallback($userId, $data)) return;
 
     // ---- Cancel flow ----
 
@@ -1032,6 +1039,10 @@ function handleStateInput($userId, $msg) {
 
         // ---- Default ----
 
+        case 'lf_awaiting_payment':
+            if (function_exists('lfPay')) { lfPay($userId); break; }
+            // no break: without the module, fall back to the menu
+
         case 'idle':
         default:
             $user = $db->getUser($userId);
@@ -1418,7 +1429,16 @@ function handleAction($userId, $action) {
                 startRegistration($userId, 'post_ad');
                 break;
             }
+            // An earlier ad still waiting for its posting fee: offer to finish it first.
+            if (function_exists('lfPendingReminder') && lfPendingReminder($userId)) break;
             showCategoryPicker($userId);
+            break;
+        case 'lfpaid':
+            // Back from Stripe checkout (success) for a listing fee - verify & publish.
+            if (function_exists('lfCheck')) lfCheck($userId);
+            break;
+        case 'lfpaycancel':
+            if (function_exists('lfPay')) lfPay($userId);
             break;
         case 'promote':
             if (!$db->getUser($userId)) {
@@ -1855,6 +1875,11 @@ function handlePublish($userId, $state) {
     global $tg, $db, $config;
 
     $adData = $state['data'];
+
+    // Paid posting: in a category with a posting fee, nothing goes to the website
+    // until Stripe confirms the fee was paid (includes/listing_fees.php).
+    if (function_exists('lfGate') && lfGate($userId, $adData)) return;
+
     $user = $db->getUser($userId);
     $adData['contact_name'] = $user['name'] ?? '';
     $adData['contact_email'] = $user['email'] ?? '';
@@ -1877,6 +1902,7 @@ function handlePublish($userId, $state) {
     }
 
     $db->setState($userId, 'idle', []);
+    if (function_exists('lfAfterPublish')) lfAfterPublish($adData, $published, $osclassId);
 
     if ($published) {
         // Ads go live on the website immediately - no admin review step.
@@ -1911,9 +1937,12 @@ function handlePublish($userId, $state) {
             $failMsg .= "\n\n\xF0\x9F\x9B\xA0 <i>Admin diagnostics:</i> " . htmlspecialchars((string) $why, ENT_QUOTES, 'UTF-8');
         }
 
+        // A paid ad must be retried WITHOUT starting over (and never charged twice).
+        $retry = !empty($adData['_lf_paid']) ? 'lf_resume_' . (int) $adData['_lf_paid'] : 'post_another';
+        if (!empty($adData['_lf_paid'])) $failMsg .= "\n\nYour payment was received - tap Try Again to publish this ad without paying again.";
         $tg->sendInlineButtons($userId, $failMsg,
             [
-                [['text' => "\xF0\x9F\x94\x84 Try Again", 'callback_data' => 'post_another']],
+                [['text' => "\xF0\x9F\x94\x84 Try Again", 'callback_data' => $retry]],
                 [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
             ]
         );
@@ -2113,6 +2142,11 @@ function registerOnWebsite($name, $phone, $email) {
 function callBridge($payload, $timeout = 30) {
     global $config;
 
+    // Test seam: automated tests answer for the website bridge. Never set in production.
+    if (isset($GLOBALS['__HL_BRIDGE_STUB']) && is_callable($GLOBALS['__HL_BRIDGE_STUB'])) {
+        return call_user_func($GLOBALS['__HL_BRIDGE_STUB'], $payload);
+    }
+
     $ch = curl_init($config['api_bridge_url']);
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($payload));
@@ -2149,7 +2183,7 @@ function callBridge($payload, $timeout = 30) {
 // ============================================================
 
 function showMainMenu($userId, $name) {
-    global $tg, $config;
+    global $tg, $config, $db;
 
     // Luggage & Transport only shows once includes/transport.php is on the server,
     // so webhook.php can be deployed without that module and the menu is unchanged.
@@ -2166,7 +2200,7 @@ function showMainMenu($userId, $name) {
         "- Connect with the community\n\n" .
         "All in one place. Tap a button below to get started:",
         array_values(array_filter([
-            [['text' => "\xF0\x9F\x93\x9D Post to Website (Free)", 'callback_data' => 'post_ad']],
+            [['text' => "\xF0\x9F\x93\x9D Post to Website" . ($db->getSetting('lf_enabled', '0') === '1' && function_exists('lfGate') ? '' : ' (Free)'), 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
             $tr ? [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'callback_data' => 'tr_menu']] : null,
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
@@ -2308,6 +2342,11 @@ function restoreStateUI($userId, $stateName, $stateData) {
             break;
 
         case 'awaiting_review':
+            showAdReview($userId, $stateData);
+            break;
+
+        case 'lf_awaiting_payment':
+            if (function_exists('lfPay')) { lfPay($userId); break; }
             showAdReview($userId, $stateData);
             break;
 
