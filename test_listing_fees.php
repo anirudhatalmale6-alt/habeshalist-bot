@@ -299,9 +299,12 @@ $alerts = array_filter($GLOBALS['__OUT'], fn ($o) => (int) $o['uid'] === $admin 
 check('group unreachable: listing still published, user told it is live', count($GLOBALS['BRIDGE']) === $n + 1 && strpos(all_text(), 'now live') !== false);
 check('group unreachable: admin alerted, recorded as failed', count($alerts) === 1 && lf_db()->querySingle("SELECT status FROM listing_shares WHERE osclass_id = '" . $GLOBALS['LAST_OID'] . "'") === 'failed');
 $GLOBALS['API_FAIL'] = [];
-$db->setSetting('sched_group_chat_id', ''); $GLOBALS['API'] = [];
-ad_ready($U, 'housing', 'sale', 'No group set'); tap($U, 'confirm_publish');
-check('no group configured: nothing is sent', count($GLOBALS['API']) === 0);
+// Schedule Settings never saved (no row at all): use the same group promotions use.
+lf_db()->exec("DELETE FROM settings WHERE key = 'sched_group_chat_id'"); $GLOBALS['API'] = [];
+ad_ready($U, 'housing', 'sale', 'Group setting never saved'); tap($U, 'confirm_publish');
+$sent = array_values(array_filter($GLOBALS['API'], fn ($c) => in_array($c['method'], ['sendPhoto', 'sendMessage'], true)));
+check('group setting never saved: posted to the scheduler\'s default group (where promotions go)',
+    count($sent) === 1 && (string) $sent[0]['params']['chat_id'] === HL_Scheduler::DEFAULTS['sched_group_chat_id']);
 $db->setSetting('ls_enabled', '0');
 
 echo "\n$pass passed, $fail failed\n";

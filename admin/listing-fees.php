@@ -37,7 +37,27 @@ require_once $__lf_lib;
 hl_lf_ensure_schema(hl_db());
 
 $flash = null; $flashType = 'ok';
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form'] ?? '') === 'share') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form'] ?? '') === 'sharetest') {
+    // Send a short test message to the group, so the owner sees at once whether
+    // the bot can post there (and Telegram's exact reason when it cannot).
+    hl_csrf_check();
+    $token = hl_effective_secret('TELEGRAM_BOT_TOKEN', 'sec_bot_token');
+    $group = trim((string) hl_sched('sched_group_chat_id'));
+    if ($token === '' || $group === '') {
+        $flash = $token === '' ? 'The bot token was not found (Keys page).' : 'No Telegram group is set (Schedule Settings).';
+        $flashType = 'err';
+    } else {
+        $r = hl_tg_api($token, 'sendMessage', ['chat_id' => $group,
+            'text' => "\xE2\x9C\x85 Test from the HabeshaList admin panel: new listings will be shared in this group."]);
+        if (!empty($r['ok'])) {
+            $flash = 'Test post sent to the group ' . $group . '. Check the group in Telegram.';
+        } else {
+            $flash = 'Telegram refused the test post to ' . $group . ': ' . (string) ($r['description'] ?? 'unknown error')
+                . '. Make sure the bot is a member (and admin) of that group and the group ID in Schedule Settings is right.';
+            $flashType = 'err';
+        }
+    }
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form'] ?? '') === 'share') {
     hl_csrf_check();
     hl_set_setting('ls_enabled', isset($_POST['ls_enabled']) ? '1' : '0');
     hl_set_setting('ls_scope', ($_POST['ls_scope'] ?? '') === 'paid' ? 'paid' : 'all');
@@ -77,11 +97,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form'] ?? '') === 'share')
 $enabled = hl_get_setting('lf_enabled', '0') === '1';
 $lsOn = hl_get_setting('ls_enabled', '0') === '1';
 $lsScope = hl_get_setting('ls_scope', 'all') === 'paid' ? 'paid' : 'all';
-$groupId = trim((string) hl_get_setting('sched_group_chat_id', ''));
-$lsStats = ['posted' => 0, 'failed' => 0];
+$groupId = trim((string) hl_sched('sched_group_chat_id'));   // falls back to the same default the scheduler uses
+$lsStats = ['posted' => 0, 'failed' => 0]; $lsRecent = [];
 if (hl_count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='listing_shares'") > 0) {
     $lsStats['posted'] = hl_count("SELECT COUNT(*) FROM listing_shares WHERE status = 'posted'");
     $lsStats['failed'] = hl_count("SELECT COUNT(*) FROM listing_shares WHERE status = 'failed'");
+    $res = hl_db()->query("SELECT osclass_id, status, error, created_at FROM listing_shares ORDER BY created_at DESC, rowid DESC LIMIT 5");
+    while ($res && ($r = $res->fetchArray(SQLITE3_ASSOC))) $lsRecent[] = $r;
 }
 $rules = hl_lf_rules(hl_db());
 $csrf = h(hl_csrf_token());
@@ -113,9 +135,20 @@ if ($flash) hl_flash($flash, $flashType);
       <option value="paid" <?= $lsScope === 'paid' ? 'selected' : '' ?>>Only paid listings</option></select></div>
     <p class="muted small" style="margin-top:8px">Group: <b><?= $groupId !== '' ? h($groupId) : 'not set - set the group in Schedule Settings' ?></b> (the same group promotions go to).
       Shared so far: <b><?= (int) $lsStats['posted'] ?></b><?= $lsStats['failed'] ? ' &middot; could not be shared: <b>' . (int) $lsStats['failed'] . '</b> (you were alerted in Telegram)' : '' ?>.</p>
+    <?php if ($lsRecent): ?>
+      <div class="muted small" style="margin-top:10px" data-share-recent>Last shares:
+        <?php foreach ($lsRecent as $r): ?>
+          <div>#<?= h($r['osclass_id']) ?> &middot; <?= h($r['created_at']) ?> &middot;
+            <?= $r['status'] === 'posted' ? '<span class="pill ok">Posted</span>' : '<span class="pill rej">Not posted</span> ' . h((string) $r['error']) ?></div>
+        <?php endforeach; ?>
+      </div>
+    <?php endif; ?>
+    <p class="muted small" style="margin-top:10px">Only listings posted through the bot <b>after</b> sharing is switched on are shared. Ads posted directly on the website are not.</p>
     <button type="submit" style="margin-top:8px">Save sharing</button>
+    <button type="submit" form="share-test" class="btn ghost" style="margin-top:8px" data-share-test>Send a test post to the group</button>
   </div>
 </form>
+<form method="post" id="share-test"><input type="hidden" name="csrf" value="<?= $csrf ?>"><input type="hidden" name="form" value="sharetest"></form>
 
 <form method="post" class="lf">
   <input type="hidden" name="csrf" value="<?= $csrf ?>">

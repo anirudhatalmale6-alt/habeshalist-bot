@@ -68,12 +68,26 @@ function lsPostText(array $adData) {
     return $head . ($desc !== '' ? "\n" . ls_h($desc) : '');
 }
 
+/**
+ * The group to post in: the saved Schedule Settings group, else the same
+ * built-in default the promotions scheduler uses (so listings go wherever
+ * promotions go, even if that setting was never saved).
+ */
+function ls_group() {
+    global $db;
+    $g = trim((string) $db->getSetting('sched_group_chat_id', ''));
+    if ($g === '' && class_exists('HL_Scheduler') && defined('HL_Scheduler::DEFAULTS')) {
+        $g = (string) (HL_Scheduler::DEFAULTS['sched_group_chat_id'] ?? '');
+    }
+    return $g;
+}
+
 /** Should this listing be shared? */
 function ls_wanted($isPaid) {
     global $db;
     if ($db->getSetting('ls_enabled', '0') !== '1') return false;
     if ($db->getSetting('ls_scope', 'all') === 'paid' && !$isPaid) return false;
-    return trim((string) $db->getSetting('sched_group_chat_id', '')) !== '';
+    return ls_group() !== '';
 }
 
 /**
@@ -93,7 +107,7 @@ function lsShareListing(array $adData, $osclassId, $isPaid) {
         $st->execute();
         if ($h->changes() !== 1) return ['ok' => false, 'skipped' => true, 'error' => 'already shared'];
 
-        $chat = trim((string) $db->getSetting('sched_group_chat_id', ''));
+        $chat = ls_group();
         $site = rtrim((string) ($config['website_url'] ?? 'https://www.habeshalist.com'), '/');
         $rows = [[['text' => "\xF0\x9F\x94\x97 View on HabeshaList", 'url' => $site . '/index.php?page=item&id=' . rawurlencode((string) $osclassId)]]];
         $bot = function_exists('getBotUsername') ? getBotUsername() : '';
