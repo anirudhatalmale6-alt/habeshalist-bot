@@ -20,6 +20,8 @@ if (is_file(__DIR__ . '/includes/transporters.php')) require_once __DIR__ . '/in
 if (is_file(__DIR__ . '/includes/transport.php'))    require_once __DIR__ . '/includes/transport.php';
 // Paid posting for classified ads (optional: without it, posting stays free).
 if (is_file(__DIR__ . '/includes/listing_fees.php')) require_once __DIR__ . '/includes/listing_fees.php';
+// Share new listings in the Telegram group (optional too).
+if (is_file(__DIR__ . '/includes/listing_share.php')) require_once __DIR__ . '/includes/listing_share.php';
 
 // Allow tests to pre-inject a mock $db / $tg; otherwise create the real ones.
 if (!isset($db)) $db = new Database(__DIR__ . '/data/bot.sqlite');
@@ -642,7 +644,7 @@ function handleMessage($msg) {
             $db->setState($userId, 'idle', []);
             $tg->sendMessage($userId,
                 "\xF0\x9F\x94\x84 Your account has been reset. You're now a first-time user again.\n\n" .
-                "Tap <b>Post to Website</b> (or send /start) and you'll be asked to register."
+                "Tap <b>Post to HabeshaList</b> (or send /start) and you'll be asked to register."
             );
         }
         return;
@@ -1921,6 +1923,9 @@ function handlePublish($userId, $state) {
             "It's published and visible on the website right away. What would you like to do next?",
             $btns
         );
+
+        // Also share it in the HabeshaList Telegram group when the admin switched that on.
+        if (function_exists('lsShareListing')) lsShareListing($adData, $osclassId, !empty($adData['_lf_paid']));
     } else {
         // Website didn't accept it (temporary bridge/site issue) - be honest and
         // let the user retry rather than claiming it's live.
@@ -2183,7 +2188,7 @@ function callBridge($payload, $timeout = 30) {
 // ============================================================
 
 function showMainMenu($userId, $name) {
-    global $tg, $config, $db;
+    global $tg, $config;
 
     // Luggage & Transport only shows once includes/transport.php is on the server,
     // so webhook.php can be deployed without that module and the menu is unchanged.
@@ -2200,7 +2205,7 @@ function showMainMenu($userId, $name) {
         "- Connect with the community\n\n" .
         "All in one place. Tap a button below to get started:",
         array_values(array_filter([
-            [['text' => "\xF0\x9F\x93\x9D Post to Website" . ($db->getSetting('lf_enabled', '0') === '1' && function_exists('lfGate') ? '' : ' (Free)'), 'callback_data' => 'post_ad']],
+            [['text' => "\xF0\x9F\x93\x9D Post to HabeshaList", 'callback_data' => 'post_ad']],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
             $tr ? [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'callback_data' => 'tr_menu']] : null,
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
@@ -2252,7 +2257,7 @@ function sendGroupButtons($chatId) {
         "- Connect with the community\n\n" .
         "All in one place. Tap a button below to get started:",
         array_values(array_filter([
-            [['text' => "\xF0\x9F\x93\x9D Post to Website (FREE)", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
+            [['text' => "\xF0\x9F\x93\x9D Post to HabeshaList", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
             [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
             $tr ? [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'url' => "https://t.me/{$botUsername}?start=transport"]] : null,
             [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],

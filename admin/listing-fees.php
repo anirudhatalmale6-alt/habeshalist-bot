@@ -37,7 +37,14 @@ require_once $__lf_lib;
 hl_lf_ensure_schema(hl_db());
 
 $flash = null; $flashType = 'ok';
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['form'] ?? '') === 'share') {
+    hl_csrf_check();
+    hl_set_setting('ls_enabled', isset($_POST['ls_enabled']) ? '1' : '0');
+    hl_set_setting('ls_scope', ($_POST['ls_scope'] ?? '') === 'paid' ? 'paid' : 'all');
+    $flash = isset($_POST['ls_enabled'])
+        ? 'Saved. New listings are shared in the Telegram group' . (($_POST['ls_scope'] ?? '') === 'paid' ? ' (paid listings only).' : '.')
+        : 'Saved. New listings are no longer shared in the group.';
+} elseif ($_SERVER['REQUEST_METHOD'] === 'POST') {
     hl_csrf_check();
     hl_set_setting('lf_enabled', isset($_POST['lf_enabled']) ? '1' : '0');
     $problems = [];
@@ -68,6 +75,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $enabled = hl_get_setting('lf_enabled', '0') === '1';
+$lsOn = hl_get_setting('ls_enabled', '0') === '1';
+$lsScope = hl_get_setting('ls_scope', 'all') === 'paid' ? 'paid' : 'all';
+$groupId = trim((string) hl_get_setting('sched_group_chat_id', ''));
+$lsStats = ['posted' => 0, 'failed' => 0];
+if (hl_count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='listing_shares'") > 0) {
+    $lsStats['posted'] = hl_count("SELECT COUNT(*) FROM listing_shares WHERE status = 'posted'");
+    $lsStats['failed'] = hl_count("SELECT COUNT(*) FROM listing_shares WHERE status = 'failed'");
+}
 $rules = hl_lf_rules(hl_db());
 $csrf = h(hl_csrf_token());
 $fmt = function ($p) { return $p === null ? '' : rtrim(rtrim(number_format((float) $p, 2, '.', ''), '0'), '.'); };
@@ -84,6 +99,23 @@ if ($flash) hl_flash($flash, $flashType);
   .lf .switch{display:flex;gap:10px;align-items:center;font-size:14px;color:var(--text)}
   .lf .switch input{width:18px;height:18px}
 </style>
+
+<form method="post" class="lf" data-share-form>
+  <input type="hidden" name="csrf" value="<?= $csrf ?>">
+  <input type="hidden" name="form" value="share">
+  <div class="card">
+    <h2>Share in the Telegram group</h2>
+    <p class="sub">When a listing posted through the bot goes live on the website, the bot also posts it in your Telegram group with its first photo and a "View on HabeshaList" button. Paid listings are shared only after the payment is confirmed.</p>
+    <label class="switch"><input type="checkbox" name="ls_enabled" value="1" <?= $lsOn ? 'checked' : '' ?> data-ls-enabled>
+      Share new listings in the Telegram group</label>
+    <div style="margin:12px 0 4px"><select name="ls_scope" aria-label="Which listings to share">
+      <option value="all" <?= $lsScope === 'all' ? 'selected' : '' ?>>All new listings</option>
+      <option value="paid" <?= $lsScope === 'paid' ? 'selected' : '' ?>>Only paid listings</option></select></div>
+    <p class="muted small" style="margin-top:8px">Group: <b><?= $groupId !== '' ? h($groupId) : 'not set - set the group in Schedule Settings' ?></b> (the same group promotions go to).
+      Shared so far: <b><?= (int) $lsStats['posted'] ?></b><?= $lsStats['failed'] ? ' &middot; could not be shared: <b>' . (int) $lsStats['failed'] . '</b> (you were alerted in Telegram)' : '' ?>.</p>
+    <button type="submit" style="margin-top:8px">Save sharing</button>
+  </div>
+</form>
 
 <form method="post" class="lf">
   <input type="hidden" name="csrf" value="<?= $csrf ?>">

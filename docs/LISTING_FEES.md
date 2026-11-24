@@ -34,3 +34,15 @@ Stripe uses the same key as the other card payments (panel > Keys).
 - Paid listing fees appear in panel > Payments > Listing fees.
 
 Tests: `php test_listing_fees.php`
+
+## Sharing new listings in the Telegram group
+
+Admin panel > Listing Fees > "Share in the Telegram group":
+- Switch on "Share new listings in the Telegram group", choose "All new listings" or "Only paid listings", Save sharing.
+- When a listing posted through the bot goes live on the website, the bot posts it in the group set in Schedule Settings (the same group promotions go to): first photo, title, price, category, location, a short part of the description, "View on HabeshaList" and "Post your own ad" buttons.
+- Paid listings are shared only after the payment is confirmed. Each listing is shared once.
+- If the group post fails, the listing stays live on the website and the admins get a Telegram alert.
+
+Files: `webhook.php`, `includes/listing_share.php` (new) in the bot folder; `listing-fees.php`, `settings.php` in the panel folder.
+
+The main menu button is now "Post to HabeshaList". The menu message already pinned in the group keeps the old label until an admin sends /setup in the group again.

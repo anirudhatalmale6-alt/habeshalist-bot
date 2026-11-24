@@ -264,7 +264,7 @@ if ($flash) hl_flash($flash, $flashType);
       $wipeOpts = [
         'promotions' => ['Payments &amp; Businesses', 'Everything under the Payments and Businesses pages (paid/pending promotions and their payment records).'],
         'scheduled'  => ['Scheduled / Dashboard posts', 'Booked and posted schedule entries &ndash; what shows in Scheduled Posts and each user\'s Dashboard.'],
-        'ads'        => ['Classified ads', 'Ads submitted through "Post to Website" (the bot-side records; ads already on the website are separate).'],
+        'ads'        => ['Classified ads', 'Ads submitted through "Post to HabeshaList" (the bot-side records; ads already on the website are separate).'],
         'referrals'  => ['Invite &amp; Earn data', 'Referrals, earned rewards and the referral audit log.'],
         'users'      => ['Users &amp; their in-bot progress', 'Every registered bot user and their current step. Most destructive &ndash; use only for a full reset.'],
       ];

@@ -9,7 +9,7 @@
 error_reporting(E_ALL);
 ini_set('display_errors', 1);
 
-$GLOBALS['__OUT'] = [];
+$GLOBALS['__OUT'] = []; $GLOBALS['API'] = []; $GLOBALS['API_FAIL'] = [];
 require __DIR__ . '/includes/telegram.php';
 class MockTelegram extends Telegram {
     public function __construct() {}
@@ -22,7 +22,12 @@ class MockTelegram extends Telegram {
     public function editMessageReplyMarkup($uid, $mid, $m = null) { return ['ok' => true]; }
     public function answerCallbackQuery($id, $t = null) { return ['ok' => true]; }
     public function deleteMessage($c, $m) { return ['ok' => true]; }
-    public function callApi($m, $p = []) { return ['ok' => true, 'result' => ['username' => 'HabeshaListBot']]; }
+    public function callApi($m, $p = []) {
+        if ($m === 'getMe') return ['ok' => true, 'result' => ['username' => 'HabeshaListBot']];
+        $GLOBALS['API'][] = ['method' => $m, 'params' => $p];
+        if (in_array($m, $GLOBALS['API_FAIL'], true)) return ['ok' => false, 'description' => "Bad Request: mock $m failure"];
+        return ['ok' => true, 'result' => ['message_id' => 4242]];
+    }
 }
 
 $dbPath = sys_get_temp_dir() . '/hl_lf_test_' . getmypid() . '.sqlite';
@@ -65,7 +70,9 @@ $GLOBALS['__HL_BRIDGE_STUB'] = function ($payload) {
     if (($payload['action'] ?? '') !== 'create_listing') return ['success' => true];
     $GLOBALS['BRIDGE'][] = $payload;
     if ($GLOBALS['BRIDGE_FAIL']) return ['success' => false, 'error' => 'mock site down'];
-    return ['success' => true, 'osclass_id' => 7000 + count($GLOBALS['BRIDGE'])];
+    $GLOBALS['LAST_OID'] = 7000 + count($GLOBALS['BRIDGE']);
+    $GLOBALS['BRIDGE'][count($GLOBALS['BRIDGE']) - 1]['_id'] = $GLOBALS['LAST_OID'];
+    return ['success' => true, 'osclass_id' => $GLOBALS['LAST_OID']];
 };
 
 require __DIR__ . '/webhook.php';
@@ -119,10 +126,9 @@ check('under $0.50 counts as free', lfFeeFor(['category' => 'jobs', 'subcategory
 
 echo "Main menu\n";
 reset_out(); showMainMenu($U, 'Saba');
-check('menu says "Post to Website" (no "Free") while fees are on', strpos(json_encode(last()['rows']), 'Post to Website (Free)') === false);
-$db->setSetting('lf_enabled', '0'); reset_out(); showMainMenu($U, 'Saba');
-check('menu keeps "(Free)" while fees are off', strpos(json_encode(last()['rows']), 'Post to Website (Free)') !== false);
-$db->setSetting('lf_enabled', '1');
+check('menu button is "Post to HabeshaList"', strpos(json_encode(last()['rows'], JSON_UNESCAPED_UNICODE), 'Post to HabeshaList') !== false && strpos(json_encode(last()['rows']), 'Post to Website') === false);
+reset_out(); sendGroupButtons(-100123);
+check('group menu button is "Post to HabeshaList" too', strpos(json_encode(last()['rows'], JSON_UNESCAPED_UNICODE), 'Post to HabeshaList') !== false && strpos(json_encode(last()['rows']), 'Post to Website') === false);
 
 echo "Paid category: pay first, then publish\n";
 ad_ready($U, 'housing', 'rent', 'Room near Silver Spring metro');
@@ -230,6 +236,73 @@ ad_ready($U2, 'housing', 'rent', 'Forged'); $s = $db->getState($U2); $s['data'][
 $db->setState($U2, 'awaiting_review', $s['data']);
 reset_out(); tap($U2, 'confirm_publish');
 check('a forged paid id in the state is ignored (new payment asked)', count($GLOBALS['BRIDGE']) === $n && strpos(last()['text'], 'Posting fee: $8') !== false);
+
+echo "Share new listings in the Telegram group\n";
+$GROUP = '-1001234567890';
+$db->setSetting('sched_group_chat_id', $GROUP);
+function group_posts() { return array_values(array_filter($GLOBALS['API'], fn ($c) => in_array($c['method'], ['sendPhoto', 'sendMessage'], true) && (string) ($c['params']['chat_id'] ?? '') === $GLOBALS['GROUP'])); }
+$GLOBALS['GROUP'] = $GROUP;
+$GLOBALS['API'] = [];
+ad_ready($U, 'housing', 'sale', 'Sharing is off');
+tap($U, 'confirm_publish');
+check('sharing is OFF by default: nothing posted in the group', count(group_posts()) === 0);
+
+$db->setSetting('ls_enabled', '1'); $db->setSetting('ls_scope', 'all');
+ad_ready($U, 'housing', 'sale', 'Condo <for> sale & more');
+$s = $db->getState($U); $s['data']['photos'] = ['PHOTO_FILE_1', 'PHOTO_FILE_2'];
+$s['data']['description'] = str_repeat('Lovely two bedroom condo with parking and a big balcony. ', 30);
+$db->setState($U, 'awaiting_review', $s['data']);
+$n = count($GLOBALS['BRIDGE']);
+reset_out(); tap($U, 'confirm_publish');
+$posts = group_posts(); $post = $posts[0] ?? null; $oid = $GLOBALS['BRIDGE'][$n]['_id'] ?? null;
+check('free listing shared once in the group, with its first photo', count($posts) === 1 && $post['method'] === 'sendPhoto' && $post['params']['photo'] === 'PHOTO_FILE_1');
+$cap = $post['params']['caption'] ?? '';
+check('caption has the title (HTML-escaped), category and location', strpos($cap, 'Condo &lt;for&gt; sale &amp; more') !== false && strpos($cap, 'Houses - Apartments for Sale') !== false && strpos($cap, 'Washington, DC') !== false);
+check('long description shortened: caption under 1024 characters', mb_strlen(strip_tags(html_entity_decode($cap))) < 1024 && strpos($cap, '...') !== false);
+$btn = $post['params']['reply_markup']['inline_keyboard'][0][0] ?? [];
+check('"View on HabeshaList" button opens the website listing', ($btn['text'] ?? '') !== '' && strpos($btn['text'], 'View on HabeshaList') !== false
+    && preg_match('#^https://www\.habeshalist\.com/index\.php\?page=item&id=7\d+$#', $btn['url'] ?? ''));
+check('the user was told it is live before/regardless of the group post', strpos(all_text(), 'now live') !== false);
+$lastId = $GLOBALS['LAST_OID'];
+$GLOBALS['API'] = [];
+lsShareListing(['title' => 'again'], $lastId, false);
+check('the same listing is never shared twice', count(group_posts()) === 0);
+
+echo "  paid listings are shared only after payment\n";
+$GLOBALS['API'] = [];
+ad_ready($U, 'housing', 'rent', 'Paid room to share'); tap($U, 'confirm_publish');
+check('not shared while waiting for payment', count(group_posts()) === 0);
+$all = rows(); $rowS = end($all); pay_session($rowS['stripe_session']);
+tap($U, 'lf_check');
+check('shared once after the payment is confirmed', count(group_posts()) === 1 && strpos(group_posts()[0]['params']['text'] ?? '', 'Paid room to share') !== false);
+
+echo "  only paid listings\n";
+$db->setSetting('ls_scope', 'paid'); $GLOBALS['API'] = [];
+ad_ready($U, 'housing', 'sale', 'Free one, paid-only scope'); tap($U, 'confirm_publish');
+check('scope "paid only": a free listing is not shared', count(group_posts()) === 0);
+ad_ready($U, 'housing', 'rent', 'Paid one, paid-only scope'); tap($U, 'confirm_publish');
+$all = rows(); $rowP = end($all); pay_session($rowP['stripe_session']); tap($U, 'lf_check');
+check('scope "paid only": a paid listing is shared', count(group_posts()) === 1);
+$db->setSetting('ls_scope', 'all');
+
+echo "  failures never affect the listing\n";
+$GLOBALS['API'] = []; $GLOBALS['API_FAIL'] = ['sendPhoto'];
+ad_ready($U, 'housing', 'sale', 'Photo fails'); $s = $db->getState($U); $s['data']['photos'] = ['EXPIRED_FILE']; $db->setState($U, 'awaiting_review', $s['data']);
+tap($U, 'confirm_publish');
+$gp = group_posts();
+check('photo failed: falls back to a text post', count($gp) === 2 && $gp[0]['method'] === 'sendPhoto' && $gp[1]['method'] === 'sendMessage');
+$GLOBALS['API'] = []; $GLOBALS['API_FAIL'] = ['sendPhoto', 'sendMessage'];
+$n = count($GLOBALS['BRIDGE']);
+ad_ready($U, 'housing', 'sale', 'Group unreachable'); reset_out(); tap($U, 'confirm_publish');
+$admin = (int) $config['admin_ids'][0];
+$alerts = array_filter($GLOBALS['__OUT'], fn ($o) => (int) $o['uid'] === $admin && strpos($o['text'], 'could not be shared in the group') !== false);
+check('group unreachable: listing still published, user told it is live', count($GLOBALS['BRIDGE']) === $n + 1 && strpos(all_text(), 'now live') !== false);
+check('group unreachable: admin alerted, recorded as failed', count($alerts) === 1 && lf_db()->querySingle("SELECT status FROM listing_shares WHERE osclass_id = '" . $GLOBALS['LAST_OID'] . "'") === 'failed');
+$GLOBALS['API_FAIL'] = [];
+$db->setSetting('sched_group_chat_id', ''); $GLOBALS['API'] = [];
+ad_ready($U, 'housing', 'sale', 'No group set'); tap($U, 'confirm_publish');
+check('no group configured: nothing is sent', count($GLOBALS['API']) === 0);
+$db->setSetting('ls_enabled', '0');
 
 echo "\n$pass passed, $fail failed\n";
 @unlink($dbPath); @unlink($dbPath . '-wal'); @unlink($dbPath . '-shm');
