@@ -163,6 +163,7 @@ function handleCallbackQuery($query) {
     // ---- Main menu actions ----
 
     if ($data === 'post_ad') { handleAction($userId, 'post_ad'); return; }
+    if ($data === 'travel_menu') { showTravelMenu($userId); return; }
     if ($data === 'promote') { handleAction($userId, 'promote'); return; }
     if ($data === 'botw') { handleAction($userId, 'botw'); return; }
     if ($data === 'contact') { handleAction($userId, 'contact'); return; }
@@ -605,6 +606,10 @@ function handleMessage($msg) {
         $param = $parts[1] ?? '';
 
         $user = $db->getUser($userId);
+
+        // Travel Habesha needs no bot registration: the Travel site signs people
+        // in (and up) with their Telegram account itself.
+        if ($param === 'travel') { showTravelMenu($userId); return; }
 
         // Is this deep-link a referral code (not one of our action keywords)?
         $isRefCode = ($param !== '' && $referral && $referral->looksLikeCode($param) && $referral->codeOwner($param));
@@ -1435,6 +1440,10 @@ function handleAction($userId, $action) {
             if (function_exists('lfPendingReminder') && lfPendingReminder($userId)) break;
             showCategoryPicker($userId);
             break;
+        case 'travel':
+            // From the group menu's "Travel Habesha" button.
+            showTravelMenu($userId);
+            break;
         case 'lfpaid':
             // Back from Stripe checkout (success) for a listing fee - verify & publish.
             if (function_exists('lfCheck')) lfCheck($userId);
@@ -2188,82 +2197,80 @@ function callBridge($payload, $timeout = 30) {
 // ============================================================
 
 function showMainMenu($userId, $name) {
-    global $tg, $config;
+    global $tg;
 
-    // Luggage & Transport only shows once includes/transport.php is on the server,
-    // so webhook.php can be deployed without that module and the menu is unchanged.
-    $tr = function_exists('trMenu');
+    $tg->sendInlineButtons($userId, hlMenuText(), [
+        [['text' => "\xF0\x9F\x93\x9D Post to HabeshaList", 'callback_data' => 'post_ad']],
+        [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
+        [['text' => "\xE2\x9C\x88\xEF\xB8\x8F Travel Habesha", 'callback_data' => 'travel_menu']],
+        [['text' => "\xF0\x9F\x9B\x8D\xEF\xB8\x8F Shop Habesha", 'url' => hlShopUrl()]],
+        [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
+        [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
+    ]);
+}
 
-    $tg->sendInlineButtons($userId,
-        "\xF0\x9F\x8F\xA0 <b>Welcome to HabeshaList.com!</b>\n\n" .
+/** The welcome text above the main menu (bot chat and group). */
+function hlMenuText() {
+    return "\xF0\x9F\x8F\xA0 <b>Welcome to HabeshaList.com!</b>\n\n" .
         "The Habesha marketplace where you can:\n" .
         "- Find housing\n" .
         "- Discover jobs\n" .
         "- Buy and Sell\n" .
         "- Promote your business\n" .
-        ($tr ? "- Send luggage with a Verified Transporter\n" : '') .
+        "- Send packages with travelers (Travel Habesha)\n" .
+        "- Shop Habesha products\n" .
         "- Connect with the community\n\n" .
-        "All in one place. Tap a button below to get started:",
-        array_values(array_filter([
-            [['text' => "\xF0\x9F\x93\x9D Post to HabeshaList", 'callback_data' => 'post_ad']],
-            [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'callback_data' => 'promote']],
-            $tr ? [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'callback_data' => 'tr_menu']] : null,
-            [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'callback_data' => 'invite']],
-            [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']],
-            [['text' => "\xF0\x9F\x93\x9E Contact Us", 'callback_data' => 'contact']],
-        ]))
-    );
+        "All in one place. Tap a button below to get started:";
 }
 
-function showContactInfo($userId) {
-    global $tg;
+// Travel Habesha (travel.habeshalist.com) and Shop Habesha addresses. The admin
+// can override them with the settings travel_url / shop_url.
+function hlTravelUrl() {
+    global $db;
+    return rtrim((string) ($db->getSetting('travel_url', '') ?: 'https://travel.habeshalist.com'), '/');
+}
+function hlShopUrl() {
+    global $db;
+    return (string) ($db->getSetting('shop_url', '') ?: 'https://shop.habeshalist.com');
+}
 
+/**
+ * Travel Habesha: each button opens travel.habeshalist.com INSIDE Telegram as a
+ * Mini App, where the person is signed in with their Telegram account (same
+ * account as on the website, never a duplicate) and lands on the page picked.
+ */
+function showTravelMenu($userId) {
+    global $tg;
+    $base = hlTravelUrl() . '/tg?to=';
+    $app = function ($label, $to) use ($base) { return [['text' => $label, 'web_app' => ['url' => $base . $to]]]; };
     $tg->sendInlineButtons($userId,
-        "\xF0\x9F\x93\x9E <b>Contact the HabeshaList Team</b>\n\n" .
-        "Need assistance or have a question? We're here to help!\n\n" .
-        "\xF0\x9F\x92\xAC Telegram Support: @Habesha_list\n" .
-        "\xF0\x9F\x93\xB1 WhatsApp: HabeshaList_Beti\n" .
-        "\xF0\x9F\x93\xA7 Email: info@habeshalist.com\n" .
-        "\xF0\x9F\x8C\x90 Website: https://habeshalist.com\n\n" .
-        "\xF0\x9F\x93\xB1 <b>Follow HabeshaList</b>\n\n" .
-        "\xF0\x9F\x93\x98 Facebook: https://www.facebook.com/beti.negatu/\n" .
-        "\xF0\x9F\x93\xB8 Instagram: https://www.instagram.com/beti_negatu/\n" .
-        "\xF0\x9F\x8E\xB5 TikTok: https://www.tiktok.com/@habeshalistofficial\n" .
-        "\xE2\x96\xB6\xEF\xB8\x8F YouTube: https://www.youtube.com/@HabeshaListOfficial\n" .
-        "\xF0\x9F\x92\xBC LinkedIn: https://www.linkedin.com/in/habesha-list/\n\n" .
-        "\xE2\x8F\xB0 <b>Support Hours</b>\n" .
-        "Monday - Friday, 9:00 AM - 5:00 PM (ET)\n\n" .
-        "Thank you for being part of the HabeshaList community! \xF0\x9F\x99\x8F",
+        "\xE2\x9C\x88\xEF\xB8\x8F <b>Travel Habesha</b>\n\n" .
+        "Send packages with travelers going home, or earn from the space in your luggage.\n\n" .
+        "Tap a button: it opens Travel Habesha right here in Telegram, signed in with your Telegram account.",
         [
+            $app("\xF0\x9F\x93\xA6 Send a Package", 'send'),
+            $app("\xF0\x9F\xA7\xB3 Post a Trip", 'trip'),
+            $app("\xF0\x9F\x94\x8D Find a Traveler", 'travelers'),
+            $app("\xF0\x9F\x93\x8B Packages Waiting", 'packages'),
+            $app("\xF0\x9F\x93\x82 My Requests", 'requests'),
             [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']],
-        ]
-    );
+        ]);
 }
 
 function sendGroupButtons($chatId) {
     global $tg;
 
+    // Groups cannot open Mini Apps directly: these buttons open the bot's chat,
+    // which shows the right menu (Travel Habesha opens from there).
     $botUsername = getBotUsername();
-    $tr = function_exists('trMenu');   // see showMainMenu()
-
-    $tg->sendInlineButtons($chatId,
-        "\xF0\x9F\x8C\x9F <b>Welcome to HabeshaList.com</b> \xF0\x9F\x8C\x9F\n\n" .
-        "The Habesha marketplace where you can:\n" .
-        "- Find housing\n" .
-        "- Discover jobs\n" .
-        "- Buy and Sell\n" .
-        "- Promote your business\n" .
-        ($tr ? "- Send luggage with a Verified Transporter\n" : '') .
-        "- Connect with the community\n\n" .
-        "All in one place. Tap a button below to get started:",
-        array_values(array_filter([
-            [['text' => "\xF0\x9F\x93\x9D Post to HabeshaList", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
-            [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
-            $tr ? [['text' => "\xF0\x9F\xA7\xB3 Luggage & Transport", 'url' => "https://t.me/{$botUsername}?start=transport"]] : null,
-            [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],
-            [['text' => "\xF0\x9F\x93\x9E Contact Us", 'url' => "https://t.me/{$botUsername}?start=contact"]],
-        ]))
-    );
+    $tg->sendInlineButtons($chatId, str_replace("\xF0\x9F\x8F\xA0 <b>Welcome to HabeshaList.com!</b>", "\xF0\x9F\x8C\x9F <b>Welcome to HabeshaList.com</b> \xF0\x9F\x8C\x9F", hlMenuText()), [
+        [['text' => "\xF0\x9F\x93\x9D Post to HabeshaList", 'url' => "https://t.me/{$botUsername}?start=post_ad"]],
+        [['text' => "\xF0\x9F\x93\xA2 Promote My Business", 'url' => "https://t.me/{$botUsername}?start=promote"]],
+        [['text' => "\xE2\x9C\x88\xEF\xB8\x8F Travel Habesha", 'url' => "https://t.me/{$botUsername}?start=travel"]],
+        [['text' => "\xF0\x9F\x9B\x8D\xEF\xB8\x8F Shop Habesha", 'url' => hlShopUrl()]],
+        [['text' => "\xF0\x9F\x8E\x81 Invite & Earn", 'url' => "https://t.me/{$botUsername}?start=invite"]],
+        [['text' => "\xF0\x9F\x93\x9E Contact Us", 'url' => "https://t.me/{$botUsername}?start=contact"]],
+    ]);
 }
 
 // ============================================================

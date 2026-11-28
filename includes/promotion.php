@@ -93,6 +93,8 @@ function promoStart($userId) {
     if (function_exists('scrStart')) {
         $buttons[] = [['text' => "\xF0\x9F\x96\xA5\xEF\xB8\x8F Advertise on a Screen", 'callback_data' => 'scr_start']];
     }
+    // The promotions dashboard (moved here from the main menu, owner 2026-11-28).
+    $buttons[] = [['text' => "\xF0\x9F\x93\x8A My Dashboard", 'callback_data' => 'promo_dashboard']];
     $buttons[] = [['text' => "\xF0\x9F\x8F\xA0 Main Menu", 'callback_data' => 'main_menu']];
 
     $db->setState($userId, 'promo_pick', []);
